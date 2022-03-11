@@ -1,0 +1,1028 @@
+---
+title: "DE Analysis of CBFB-MYH11 AML by Breakpoints"
+author: "Jenny Smith"
+date: "March 25, 2020"
+output: html_document
+---
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+clinical <- substr(CDE,1,nchar(CDE)-4)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME, "2020.09.15_RNAseq_Fusion_Breakpoints"))
+
+
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center')
+options(stringsAsFactors = FALSE, useNA = "always", na.rm = T)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(gridExtra)
+library(tidyr)
+library(dplyr)
+library(RColorBrewer)
+library(DelayedArray)
+library(DeGSEA)
+getwd()
+```
+
+
+
+#Read in the clinical Data
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_9.18.20.csv"))
+
+
+
+merged <- merged %>%
+  filter(!is.na(USI), USI != "Unknown") %>%
+  set_rownames(.$USI)
+
+inelig <- c(773920,775026, 786948,799528)
+ineligables <- merged %>% 
+  filter(Eligibility_Comments == "remove" | Reg. %in% inelig) %>% 
+  pull(USI)
+
+dim(merged)
+```
+
+```{r}
+# table(merged$c.Kit.Mutation.Exon.17,useNA='ifany')
+# table(merged$c.Kit.Mutation.Exon.8,useNA='ifany')
+# 
+# table(merged$c.Kit.Mutation.Exon.17,
+#       merged$Protocol, useNA='ifany')
+# table(merged$c.Kit.Mutation.Exon.8,
+#       merged$Protocol, useNA='ifany')
+```
+
+```{r}
+groups <- read.csv("TARGET_AML_CBFB_MYH11_Breakpoint_Exon_Data_REG_10.29.20.csv") %>% 
+    filter(!(c.Kit.Mutation.Exon.8 == "Yes" & c.Kit.Mutation.Exon.17 == "Yes")) %>%
+    mutate(Exon5_33_cKIT.mut=case_when(
+    Fusion_Breakpoint=="B" ~ "Other_Exons",
+    Fusion_Breakpoint=="A" & c.Kit.Mutation.Exon.8 == "Yes" ~ "Exon5_33/cKIT.E8",
+    Fusion_Breakpoint=="A" & c.Kit.Mutation.Exon.17 == "Yes" ~ "Exon5_33/cKIT.E17",
+    TRUE ~ "No_cKIT_Mut")) 
+
+
+head(groups)
+dim(groups)
+```
+  
+```{r}
+manifest <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_10.08.20.csv"))
+
+dim(manifest)
+```
+
+## Samples of Interest
+
+```{r}
+CICERO <- read.csv(file.path(PROJHOME,"2020.04.13_CICERO_Fusion_St.Jude/CICERO_raw/Raw_CICERO_Output_ITDs_20200324.csv")) %>% 
+  mutate(USI=str_split_fixed(Patient, pattern="\\.", n=5)[,3]) %>% 
+  select(Patient, USI, everything())
+
+
+# head(CICERO[,1:5])
+dim(CICERO)
+length(unique(CICERO$Patient)) #1180
+```
+
+
+```{r}
+cbfb.myh11 <- c("PARDMG",
+"PARMGX",
+"PARCHW",
+"PASSGX",
+"PAWSED",
+"PAVGXC",
+"PAVNKI",
+"PAWLUE",
+"PAXMKT")
+
+data.avail <- sample_info %>% 
+  filter(USI %in% cbfb.myh11) 
+
+
+data.avail %>% 
+  filter(grepl("rlps", Batch))
+# length(unique(data.avail$USI)) #4 with relapse data
+
+# merged %>% 
+#   filter(USI %in% data.avail$USI) %>% 
+#   select(USI, matches("FLT3|Event|^EFS"))
+
+
+
+missing <- setdiff(cbfb.myh11, sample_info$USI)
+# 
+# merged %>% 
+#   filter(USI %in% missing)
+```
+
+```{r}
+CICERO %>% 
+  filter(USI %in% cbfb.myh11) %>% 
+  filter(grepl("FLT3", Fusion.Gene))
+```
+
+
+# RNAseq counts
+
+```{r}
+cts <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_2646Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.RDS"))
+
+
+
+cts <- as.data.frame(cts)
+rownames(cts) <- cts$Gene
+cts <- cts[,-1]
+
+dim(cts)
+head(cts[,1:5])
+```
+
+
+```{r}
+TPM <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_2646Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.RDS"))
+
+
+TPM <- as.data.frame(TPM)
+rownames(TPM) <- TPM$Gene
+TPM <- TPM[,-1]
+
+dim(TPM)
+head(TPM[,1:5])
+
+# any(is.na(rownames(TPM))) #OK
+# all(complete.cases(TPM)) #OK
+```
+
+
+PAXXBC
+PAXXCX
+
+#Samples for Ben
+
+```{r}
+tmp <- cts[,grep("PAXXBC|PAXXCX", colnames(cts),value=T)]
+head(tmp)
+dim(tmp)
+
+# write.csv(tmp,"TARGET_AML_PAXXBC_PAXXCX_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.csv")
+```
+
+
+```{r}
+tmp2 <- TPM[,grep("PAXXBC|PAXXCX", colnames(TPM),value=T)]
+head(tmp2)
+dim(tmp2)
+# write.csv(tmp2, "TARGET_AML_PAXXBC_PAXXCX_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.csv")
+```
+
+
+#Define Samples
+
+for the variant junction, "Other_Exons" to that of KIT negative 5;33 group
+
+```{r}
+table(groups$Exon5_33_cKIT.mut, useNA = 'ifany')
+```
+
+```{r}
+sample_info_DE <- manifest %>%
+  inner_join(., select(groups,-Protocol,-Group), 
+             by="USI") %>% 
+  select(-USI) %>% 
+  filter(grepl("diagnostic", Time_point)) %>%  #| grepl("Unsorted", Sample)
+  filter(!grepl("_rep", Sample)) %>% 
+  filter(!grepl("cKIT.E17|cKIT.E8",Exon5_33_cKIT.mut)) %>% 
+  select(USI=Sample,everything()) %>% 
+  as.data.frame() %>% 
+  set_rownames(.$USI)
+
+  
+head(sample_info_DE)
+dim(sample_info_DE)
+table(sample_info_DE$Time_point)
+table(sample_info_DE$Exon5_33_cKIT.mut, useNA = 'ifany')
+# table(duplicated(sample_info_DE$USI)) #FALSE
+# table(sample_info_DE$Group)
+```
+
+
+
+# DEGs
+
+```{r}
+col.bar.cols <- c("Age.Category","Cytogenetic.Category.1",
+  "Cytogenetic.Category.2", "SNVs","Rare.Fusions", "Exon5_33_cKIT.mut")
+
+col.bar.cols %in% colnames(sample_info)
+```
+
+```{r}
+DEGs.all <- twoGroups_DEGs(expnData = cts,
+                           clinData = sample_info_DE, 
+                           col = "Exon5_33_cKIT.mut", 
+                           ref = "No_cKIT_Mut",
+                           Custom.Cols = col.bar.cols)
+
+length(DEGs.all)
+# saveRDS(DEGs.all,"TARGET_AML_CBFB_MYH11_OtherExons_vs_E5_33_DEGs.RDS")
+```
+
+t`annotation_height` is set with length of one while with multiple annotations, `annotation_height` is treated as
+`height`.
+
+converting counts to integer mode
+some variables in design formula are characters, converting to factors[1] 6
+
+
+```{r}
+DEGs.all <- readRDS("CBFB.MYH11_Results/DE_Analysis/TARGET_AML_CBFB_MYH11_OtherExons_vs_E5_33_DEGs.RDS")
+
+length(DEGs.all)
+table(DEGs.all$phenovector)
+```
+
+```{r}
+DEGs.genelvl <- extract_DEGs(twoGroups_DEGs.res = DEGs.all,geneLevel =TRUE, anno=TRUE) %>% 
+  mutate(Comparison="CBFB-MYH11_OtherExons vs CBFB-MYH11_E5_33_No_cKIT",
+         Num_Samples="OtherExons: 27; E5_33: 51", 
+         Has_ADC_CART=ifelse(!is.na(Drug.treatment.symbol.or.trade.name), "Yes", "")) %>% 
+  dplyr::select(gene,Comparison,Num_Samples,Has_ADC_CART, everything())
+
+DEGs.genelvl
+# write.csv(DEGs.genelvl, "CBFB.MYH11_Results/DE_Analysis/TARGET_AML_CBFB_MYH11_OtherExons_vs_E5_33_DEGs_anno.csv", row.names = F)
+# table(DEGs.genelvl$logFC > 1)
+```
+
+```{r fig.height=10, fig.width=14}
+# pdf("TARGET_AML_CBFB_MYH11_OtherExons_vs_E5_33_DEGs_Heatmap.pdf", height = 10, width = 14)
+DEGs.all$Heatmap
+# dev.off()
+```
+
+#GSEA 
+
+```{r}
+kegg_gsea <- gage_from_pipeline(twoGroups_DEGs.res = DEGs.all, type="expn")
+
+length(kegg_gsea)
+```
+
+```{r}
+options(scipen = 999)
+Up.Kegg <- kegg_gsea$SigPaths.Up[kegg_gsea$essSets.Up$essentialSets,] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Pathway") %>% 
+  filter(q.val < 0.05)
+
+Up.Kegg
+```
+
+```{r}
+Dn.Kegg <- kegg_gsea$SigPaths.Dn[kegg_gsea$essSets.Dn$essentialSets,] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Pathway") %>% 
+  filter(q.val < 0.05)
+
+Dn.Kegg
+```
+
+
+
+#UMAP
+
+## Subset UMAP
+
+```{r}
+umap_res_orig <- read.csv(file.path(PROJHOME,"2019.12.31_UMAP_Clustering/Results/Dx_DS_MPN_bulkNBM_PCAselect_sg7655/TARGET_AML_sg7655_noScale_PCAselect_k31_CDE_2.14.20.csv"), row.names = 1) %>% 
+  select(Sample:cluster_k31) %>%
+  left_join(., dplyr::select(manifest,Sample:Tissue),  by="Sample") %>%
+  left_join(., dplyr::select(merged, -Group,-Protocol), by="USI") %>%
+  left_join(., dplyr::select(groups,USI,Exon5_33_cKIT.mut,Fusion_Breakpoint,
+                      Fusion_Breakpoint_Unmasked),
+            by="USI") %>% 
+  mutate_at(vars(Exon5_33_cKIT.mut), ~case_when(
+    is.na(.) ~ AML_Subtype,
+    .=="No_cKIT_Mut" ~ paste0("Inv16/Exon5_33/", .),
+    grepl("Exon5_33|Other_Exons", .) ~ paste0("Inv16/", .))) %>% 
+  
+  mutate(Exon5_33_cKIT.mut_forPlot=case_when(
+    grepl("AML|GLIS|DEK|ETS|NSD1|RBM15|KDM5A", Exon5_33_cKIT.mut) ~ "Various_Fusions",
+    TRUE ~ Exon5_33_cKIT.mut)) %>% 
+  filter(!grepl('CBFB-MYH11', Exon5_33_cKIT.mut)) %>%
+  select(1:4,cluster_k31,Exon5_33_cKIT.mut,everything())#no breakpoint data
+
+
+# sum(grepl("CBFB-MYH11", umap_res_orig$AML_Subtype)) #107
+# sum(grepl("CBFB-MYH11", umap_res_orig$Primary.Fusion)) #107/198 with breakpoint data
+# any(duplicated(umap_res_orig$Sample))
+
+head(umap_res_orig)
+dim(umap_res_orig) #1694  168
+# table(umap_res_orig$cluster_k31)
+table(umap_res_orig$AML_Subtype, useNA='ifany')
+# table(umap_res_orig$Exon5_33_cKIT.mut, useNA='ifany')
+# table(umap_res_orig$Exon5_33_cKIT.mut_forPlot, useNA='ifany')
+
+
+# write.csv(umap_res_orig,"CBFB.MYH11_Results/TARGET_AML_sg7655_noScale_PCAselect_k31_CDE_11.02.20.csv")
+```
+
+```{r}
+umap_res_sub <- umap_res_orig %>% 
+  select(-cluster) %>%
+  mutate(cluster=as.character(cluster_k31)) %>% 
+  group_by(cluster) %>% 
+  filter(sum(grepl("CBFB-MYH11|RUNX1-RUNX1T1", AML_Subtype)) > 1) %>%
+  filter(sum(grepl("CBFB-MYH11", AML_Subtype)) >= 1) %>%
+  ungroup() %>%
+  
+  filter(!grepl("DS|CBFB-MYH11|TMD|NBM",Exon5_33_cKIT.mut)) %>%
+  
+  mutate_at(vars(Exon5_33_cKIT.mut), ~case_when(
+    grepl("AML|GLIS|DEK|ETS-Fusion|NUP98-NSD1|KDM5A", .) ~ "Various_Fusions",
+    TRUE ~ .)) %>% 
+ 
+  select(Sample:cluster_k31, cluster, everything ()) %>% 
+  mutate_at(vars(cluster), ~paste0("C",.)) %>% 
+  arrange(Exon5_33_cKIT.mut) %>% 
+  select(Sample:cluster,Exon5_33_cKIT.mut,everything()) 
+
+# umap_res_sub
+table(umap_res_sub$Exon5_33_cKIT.mut, useNA='ifany') #27 "Other Exons"
+
+table(umap_res_sub$Exon5_33_cKIT.mut,
+      umap_res_sub$cluster,
+      useNA='ifany') #27 "Other Exons"
+```
+
+```{r}
+exon_vs_cluster <- umap_res_orig %>% 
+  select(Fusion_Breakpoint,Fusion_Breakpoint_Unmasked,Cluster=cluster_k31) %>%
+  group_by(Fusion_Breakpoint,Fusion_Breakpoint_Unmasked,Cluster) %>% 
+  summarize(Number_of_Samples=n()) %>%
+  ungroup() %>% 
+  filter(!is.na(Fusion_Breakpoint_Unmasked)) %>% 
+  arrange(Fusion_Breakpoint, desc(Number_of_Samples), Cluster) 
+
+# write.csv(exon_vs_cluster, 
+#           "CBFB.MYH11_Results/UMAP/TARGET_AML_CBFB_MYH11_Breakpoint_vs_Cluster_Table.csv", 
+#           row.names = FALSE)
+sum(exon_vs_cluster$Number_of_Samples)
+```
+
+```{r}
+clusters_with_CBFB <-  umap_res_sub %>%
+  group_by(cluster, Exon5_33_cKIT.mut) %>%
+  summarize(N=n()) %>%
+  ungroup() 
+
+
+# clusters_with_CBFB
+
+C5_vs_Exon <- umap_res_sub  %>%
+  filter(grepl("A|B", Fusion_Breakpoint)) %>%
+  select(Sample,Fusion_Breakpoint,cluster) %>% 
+  group_by(Fusion_Breakpoint, cluster) %>% 
+  summarise(N=n()) %>% 
+  ungroup() %>% 
+  mutate(cluster=ifelse(cluster=="C5","C5", "notC5")) %>% 
+  group_by(Fusion_Breakpoint,cluster) %>% 
+  summarise(N=sum(N)) %>% 
+  ungroup() %>% 
+  spread(cluster, N) %>% 
+  as.data.frame() %>% 
+  column_to_rownames("Fusion_Breakpoint")
+C5_vs_Exon
+
+# write.csv(C5_vs_Exon,"CBFB.MYH11_Results/DE_Analysis/CBFB_MYH11_OtherExons_perCluster.csv",row.names = F)
+
+x2 <- chisq.test(x=C5_vs_Exon)
+# x2$p.value
+
+# length(unique(umap_res_orig$AML_Subtype))
+```
+
+
+```{r fig.height=10, fig.width=10}
+
+
+Cols <- c("Sample", "Group", "cluster","Primary.Fusion","Age.in.years","EFS.event.type.ID","Overlap.Mutation.Info")
+# all(Cols %in% colnames(umap_res_sub))
+
+#blackbg is not working for some reason?????
+p_recolor <- scatter_plots_3d(umap_workflow_res = list(umap_res=umap_res_sub),
+                              Cols = Cols,
+                              cc=c("red1", "red4","pink4","cyan2","darkgoldenrod2","grey50", "orange4","slateblue4"),
+                              # Group_Column = "cluster",
+                              Group_Column = "Exon5_33_cKIT.mut",
+                              blackbg = FALSE)
+
+
+# p_recolor
+```
+
+```{r}
+# htmlwidgets::saveWidget(widget=p_recolor,file="TARGET_AML_sg7655_CBFB_MYH11_Subset_by_Breakpoint_10.30.20.html",
+#                         selfcontained = T,background = "white")
+
+```
+
+```{r}
+cc_main <- c("Inv16/Exon5_33/cKIT.E17"="red1","Inv16/Exon5_33/cKIT.E8"="red4","Inv16/Exon5_33/No_cKIT_Mut"="pink4",
+        "Inv16/Other_Exons" = "cyan2",
+        "KMT2A"="darkgoldenrod2","No.Primary.Fusion"="grey50",
+        "RUNX1-RUNX1T1"="orange4",
+        "Various_Fusions"="slateblue4",
+        "NBM"="yellow2",
+        "DS"="green4",
+         "TMD"="wheat2",
+        "MPN"="deeppink2")
+
+p.all <- ggplot(umap_res_orig, aes(x=x,y=y, color=Exon5_33_cKIT.mut_forPlot)) +
+  geom_point(alpha=0.75, size=0.75) +
+  geom_point(data=filter(umap_res_orig, 
+                         Exon5_33_cKIT.mut_forPlot == "Inv16/Other_Exons"),
+             mapping=aes(x=x,y=y,fill=Exon5_33_cKIT.mut_forPlot,
+                         color=Exon5_33_cKIT.mut),
+             alpha=0.85,size=0.75, show.legend = F) +
+  labs(x="umap_1", y="umap_2", title="UMAP Clustering of CBFB-MYH11 AML") +
+  scale_color_manual(values=cc_main) +
+  guides(color = guide_legend(override.aes = list(size = 4),title = NULL)) +
+  theme_classic()
+
+
+p.all
+
+# ggsave(plot=p.all, filename = "CBFB.MYH11_Results/TARGET_AML_CBFB_MYH11_UMAP_allPts_sg7655.svg", height = 7, width = 9, units="in",device = "svg")
+```
+
+```{r fig.height=3, fig.width=3}
+
+p1 <- ggplot(umap_res_sub, aes(x=x,y=y, color=Exon5_33_cKIT.mut)) +
+  geom_point(alpha=0.75) +
+  geom_point(data=filter(umap_res_sub, Exon5_33_cKIT.mut == "Inv16/Other_Exons"),
+             mapping=aes(x=x,y=y,fill=Exon5_33_cKIT.mut, color=Exon5_33_cKIT.mut),
+             alpha=0.85, show.legend = F) +
+  stat_ellipse(data=umap_res_sub, mapping=aes(x=x,y=y,group=cluster), 
+               color="grey",
+               type="norm",level = 0.95, inherit.aes = F, show.legend = F) +
+  labs(x="umap_1", y="umap_2", title="UMAP Clustering of CBFB-MYH11 AML") +
+  scale_color_manual(values=c("red1", "red4","pink4","cyan2","darkgoldenrod2","grey50", "orange4","slateblue4")) +
+  guides(color = guide_legend(override.aes = list(size = 4),title = NULL)) +
+  theme(legend.title = element_blank()) +
+  theme_classic()
+
+
+
+# p2 <- ggplot(umap_res_sub, aes(x=x,y=z, color=Exon5_33_cKIT.mut)) +
+#   geom_point(alpha=0.75) +
+#   geom_point(data=filter(umap_res_sub, Exon5_33_cKIT.mut == "Inv16/Other_Exons"),
+#              mapping=aes(x=x,y=z,fill=Exon5_33_cKIT.mut, color=Exon5_33_cKIT.mut),
+#              alpha=0.85, show.legend = F) +
+#   stat_ellipse(data=umap_res_sub, mapping=aes(x=x,y=z,group=cluster),
+#                color="grey",
+#                type="norm",level = 0.95, inherit.aes = F, show.legend = F) +
+#   labs(x="umap_1", y="umap_2", title="UMAP Clustering of CBFB-MYH11 AML") +
+#   scale_color_manual(values=c("red1", "red4","pink4","cyan2","darkgoldenrod2","grey50", "orange4","slateblue4")) +
+#   theme_classic() +
+#   guides(color = guide_legend(override.aes = list(size = 3),title = "THIS")) +
+#   theme(legend.title = element_blank()) 
+
+
+p1
+# ggsave(plot=p1, filename = "TARGET_AML_CBFB_MYH11_UMAP_Subset_sg7655.svg", height = 5, width = 7, units="in",device = "svg")
+# p2
+
+```
+
+## CBFB-MYH11 and RUNX1-RUNX1T1
+
+```{r}
+sample_info_umap <- manifest %>%
+  filter(!grepl("replicate", Sample)) %>% 
+  filter(Group=="AML" | Group == "FlowSorted") %>% 
+  filter(grepl("CBFB-MYH11|RUNX1-RUNX1T1", AML_Subtype)) %>% 
+  filter(Time_point=="diagnostic" | grepl("unsorted", Sample, ignore.case = T)) %>% 
+  left_join(., dplyr::select(merged, -Group,-Protocol), by="USI") %>%
+  left_join(., dplyr::select(groups,USI,Exon5_33_cKIT.mut,Fusion_Breakpoint,
+                      Fusion_Breakpoint_Unmasked),
+            by="USI") %>%
+  mutate_at(vars(Exon5_33_cKIT.mut), ~case_when(
+    is.na(.) ~ AML_Subtype,
+    .=="No_cKIT_Mut" ~ paste0("Inv16/Exon5_33/", .),
+    grepl("Exon5_33|Other_Exons", .) ~ paste0("Inv16/", .))) %>%
+  filter(Exon5_33_cKIT.mut != "CBFB-MYH11") %>%  #no breakpoint data
+
+  as.data.frame() %>%
+  set_rownames(.$Sample)
+
+  
+head(sample_info_umap)
+#any(duplicated(sample_info_umap$USI)) #FALSE
+dim(sample_info_umap) #288 155
+
+
+table(sample_info_umap$Exon5_33_cKIT.mut, useNA='ifany')
+
+```
+
+```{r}
+# table(sample_info_umap$Time_point)
+# table(sample_info_umap$Tissue)
+
+Cols <- c("Exon5_33_cKIT.mut","AML_Subtype","Batch","Tissue")
+all(Cols %in% colnames(sample_info_umap))
+```
+
+```{r}
+suppressPackageStartupMessages(library(DelayedArray))
+#Filter low counts
+cts_umap <- cts[,sample_info_umap$Sample]
+keep <- rowSums(edgeR::cpm(cts_umap)) >= 0.05*ncol(cts_umap)
+cts_umap <- cts_umap[keep,]
+
+#size factor scaling 
+cell_total <- apply(cts_umap, 2, sum)
+geomean <- exp(mean(log(cell_total)))
+sf <- cell_total/geomean
+sf.scaled <- t(t(cts_umap)/sf)
+
+#TF-IDF Norm
+tf <- seqGlue::tf_idf_transform(matrix = as.matrix(sf.scaled))
+tf_log <- seqGlue::tf_idf_transform(matrix= as.matrix(log2(sf.scaled+1)))
+
+gc()
+
+# Mean vs Dispersion Feature Selection 
+obj <- seqGlue::calc_dispersion(as.matrix(sf.scaled), removeOutliers = TRUE) #removes outlier genes/transcripts based on cooks distance
+gc()
+
+selGenes <- seqGlue::get_selected_genes(seqGlue::select_genes(obj, top_n=NULL))
+tf <- tf[selGenes,]
+tf_log <- tf_log[selGenes,]
+
+# head(tf[,1:5])
+dim(tf) #6374  284
+dim(tf_log) #6374  284
+```
+
+
+```{r fig.height=4, fig.width=15}
+colors37 = c("#466791","#60bf37","#953ada","#4fbe6c","#ce49d3","#a7b43d","#5a51dc","#d49f36","#552095","#507f2d","#db37aa","#84b67c","#a06fda","#df462a","#5b83db","#c76c2d","#4f49a3","#82702d","#dd6bbb","#334c22","#d83979","#55baad","#dc4555","#62aad3","#8c3025","#417d61","#862977","#bba672","#403367","#da8a6d","#a79cd4","#71482c","#c689d0","#6b2940","#d593a7","#895c8b","#bd5975")
+
+# barplot(rep(1,37), col=colors37, names.arg = colors37, las=2)
+
+df <- sample_info_umap %>% 
+  dplyr::select(all_of(Cols))
+
+
+cc <- colorCodes_aheatmap(df=df)
+cc[["Exon5_33_cKIT.mut"]] <- c("orange4","red1","red4","pink4","cyan2")
+names(cc[["Exon5_33_cKIT.mut"]]) <- unique(df$Exon5_33_cKIT.mut)
+
+par(mar=c(10,4,4,4))
+barplot(rep(1,length(cc$Exon5_33_cKIT.mut)), col=cc$Exon5_33_cKIT.mut, names.arg = names(cc$Exon5_33_cKIT.mut), las=2)
+```
+
+```{r}
+pca_res <- readRDS("Jackstraw_pca_2020-11-02.RDS")
+
+pca_res$N_comp
+length(pca_res$input_features) #4107
+```
+
+```{r}
+samples_vector <- pull(sample_info_umap, Sample)
+umap.cbf.runx1 <- UMAP_workflow(TFIDF_Matrix = tf, 
+                                input_features = selGenes,
+                                samples_vector = samples_vector, 
+                                sample_info_df = sample_info_umap,
+                                min_dist=0.2,
+                                n_neighbors=25L,
+                                cc = cc, 
+                                k2=35,res2=0.2,
+                                Columns_for_Plots = Cols,
+                                addl_color_vector = colors37)
+
+# umap.cbf.runx1
+
+length(umap.cbf.runx1)
+# min_dist=0.2,  n_neighbors=25L, k2=30,res2=0.2, for 6 clusters 
+# min_dist=0.2, n_neighbors=25L,k2=35,res2=0.2, for 5 clusters
+# min_dist=0.2, n_neighbors=25L, k2=40,res2=0.15, for 4 clusters  BUT doesnt separate the inv16/t(8;21)
+#min_dist=0.2, n_neighbors=25L, k2=45,res2=0.2,for 4 clusters  BUT doesnt separate the inv16/t(8;21)
+
+# saveRDS(umap.cbf.runx1, "CBFB.MYH11_Results/DE_Analysis/TARGET_AML_dx_CBFB-MYH11_RUNX1-RUNX1T1_UMAP_sg4107.RDS")
+# saveRDS(umap.cbf.runx1, "CBFB.MYH11_Results/TARGET_AML_dx_CBFB-MYH11_RUNX1-RUNX1T1_UMAP_sg6374_11.03.20.RDS")
+
+
+```
+
+```{r}
+umap.cbf.runx1$umap_res <- umap.cbf.runx1$umap_res %>%  
+  select(x:Sample,cluster_k5, Exon5_33_cKIT.mut,Fusion_Breakpoint,
+         Fusion_Breakpoint_Unmasked, Primary.Fusion=Primary.Fusion.y,
+         everything()) %>%
+  mutate(cluster=cluster_k5)
+  
+
+# dim(umap.cbf.runx1$umap_res)
+# head(umap.cbf.runx1$umap_res[,1:10])
+
+
+
+table(umap.cbf.runx1$umap_res$cluster_k5,
+      umap.cbf.runx1$umap_res$Exon5_33_cKIT.mut)
+
+table(umap.cbf.runx1$umap_res$Exon5_33_cKIT.mut)
+
+
+# write.csv(umap.cbf.runx1$umap_res, "CBFB.MYH11_Results/DE_Analysis/TARGET_AML_dx_CBFB-MYH11_RUNX1-RUNX1T1_UMAP_sg6374_11.03.20.csv", row.names = FALSE)
+```
+
+```{r}
+p.cbf1 <- ggplot(umap.cbf.runx1$umap_res, aes(x=x,y=y, color=Exon5_33_cKIT.mut)) +
+  geom_point(alpha=0.75) +
+  geom_point(data=filter(umap.cbf.runx1$umap_res,
+                         Exon5_33_cKIT.mut == "Inv16/Other_Exons"),
+             mapping=aes(x=x,y=y,fill=Exon5_33_cKIT.mut,
+                         color=Exon5_33_cKIT.mut),
+             alpha=0.85, show.legend = F) +
+  stat_ellipse(data=umap.cbf.runx1$umap_res, 
+               mapping=aes(x=x,y=y,fill=cluster_k5, group=cluster_k5),
+               color="grey",
+               # geom="polygon",
+               alpha=0.5,
+               type="norm",level = 0.95,
+               inherit.aes = F, 
+               show.legend = F) +
+  labs(x="umap_1", y="umap_2", title="UMAP Clustering of CBFB-MYH11 AML") +
+  scale_color_manual(values=cc$Exon5_33_cKIT.mut) +
+  # scale_color_gradient(low="red1",high="red4") +
+  theme_classic()
+
+
+p.cbf1
+# ggsave(plot = p.cbf1, filename = "CBFB.MYH11_Results/TARGET_AML_dx_CBFB-MYH11_RUNX1-RUNX1T1_UMAP_sg4107_UMAP_2Dscatter.svg", height = 5, width=7, units="in", device = "svg")
+
+# p.cbf2 <- ggplot(umap.cbf.runx1$umap_res, aes(x=x,y=z, color=Exon5_33_cKIT.mut)) +
+#   geom_point(alpha=0.75) +
+#   geom_point(data=filter(umap.cbf.runx1$umap_res, Exon5_33_cKIT.mut == "Inv16/Other_Exons"),
+#              mapping=aes(x=x,y=z,fill=Exon5_33_cKIT.mut, color=Exon5_33_cKIT.mut),
+#              alpha=0.85, show.legend = F) +
+#   stat_ellipse(data=umap.cbf.runx1$umap_res, 
+#                mapping=aes(x=x,y=z,group=cluster_k3), 
+#                color="grey",
+#                type="norm",level = 0.95, inherit.aes = F, show.legend = F) +
+#   labs(x="umap_1", y="umap_3", title="UMAP Clustering of CBFB-MYH11 AML") +
+#   scale_color_manual(values=cc$Exon5_33_cKIT.mut) +
+#   theme_classic()
+# 
+# p.cbf2
+```
+
+```{r fig.height=3}
+# umap.cbf.runx1$umap_2D_scatter
+```
+
+
+### Outcome by Cluster Number
+
+```{r}
+outcome_by_k5 <- umap.cbf.runx1$umap_res %>%  
+  unite("cluster_subtype", cluster_k5, Exon5_33_cKIT.mut,sep = ": ", remove = F) %>% 
+  filter(!is.na(EFS.time..days.))
+
+
+# table(outcome_by_k5$cluster_subtype)
+```
+
+```{r fig.height=7}
+runx1.df <- filter(outcome_by_k5, AML_Subtype=="RUNX1-RUNX1T1") %>% 
+  group_by(cluster_subtype) %>% 
+  filter(n() > 5) %>% 
+  ungroup()
+
+RUNX1.byClust <- KM.plots(df = runx1.df, 
+                          group_vars = NULL,
+                          covariate = "cluster_subtype",
+                          type = "OS",
+                          cohort = "1031")
+
+
+# plot(RUNX1.byClust$OS[[1]])
+plot(RUNX1.byClust$EFS[[1]])
+```
+
+```{r fig.height=5}
+cbfb.df <- filter(outcome_by_k5, AML_Subtype=="CBFB-MYH11") %>% 
+  group_by(cluster_subtype) %>% 
+  filter(n() > 5) %>% 
+  ungroup()
+
+CBFB.byClust <- KM.plots(df = cbfb.df, 
+                          group_vars = NULL,
+                          covariate = "cluster_subtype",
+                          type = "OS",
+                          cohort = "1031")
+
+
+# plot(CBFB.byClust$OS[[1]])
+plot(CBFB.byClust$EFS[[1]])
+```
+
+```{r fig.height=10, fig.width=10}
+Cols <- c("Sample", "Group", "cluster","Primary.Fusion","Age.in.years","EFS.event.type.ID","Overlap.Mutation.Info")
+all(Cols %in% colnames(umap.cbf.runx1$umap_res))
+
+#blackbg is not working for some reason?????
+p_breakpoints <- scatter_plots_3d(umap_workflow_res = umap.cbf.runx1,
+                              Cols = Cols,
+                              cc=c("red1", "red4","pink4","cyan2", "orange4"),
+                              # Group_Column = "cluster",
+                              Group_Column = "Exon5_33_cKIT.mut",
+                              blackbg = FALSE)
+
+
+
+
+# htmlwidgets::saveWidget(widget=p_breakpoints,file="TARGET_AML_dx_CBFB-MYH11_RUNX1-RUNX1T1_sg6374_by_Breakpoint_11.03.20.html",
+#                         selfcontained = T,background = "white")
+```
+ 
+
+
+## CBFB-MYH11 Only
+
+```{r}
+sample_info_CBFB <- manifest %>%
+  filter(!grepl("replicate", Sample)) %>% 
+  filter(Group=="AML" | Group == "FlowSorted") %>% 
+  filter(grepl("CBFB-MYH11", AML_Subtype)) %>% 
+  filter(Time_point=="diagnostic" | grepl("unsorted|BM[0-9]|RO[0-9]", Sample, ignore.case = T)) %>% 
+  left_join(., dplyr::select(merged, -Group,-Protocol), by="USI") %>%
+  left_join(., dplyr::select(groups,USI,Exon5_33_cKIT.mut,Fusion_Breakpoint,
+                      Fusion_Breakpoint_Unmasked),
+            by="USI") %>%
+  mutate_at(vars(Exon5_33_cKIT.mut), ~case_when(
+    is.na(.) ~ AML_Subtype,
+    .=="No_cKIT_Mut" ~ paste0("Inv16/Exon5_33/", .),
+    grepl("Exon5_33|Other_Exons", .) ~ paste0("Inv16/", .))) %>%
+  filter(Exon5_33_cKIT.mut != "CBFB-MYH11") %>%  #no breakpoint data
+
+  as.data.frame() %>%
+  set_rownames(.$Sample)
+
+  
+head(sample_info_CBFB)
+# any(duplicated(sample_info_CBFB$USI)) #FALSE
+# dim(sample_info_CBFB) #120 155
+
+
+table(sample_info_CBFB$Exon5_33_cKIT.mut, useNA='ifany')
+```
+
+```{r}
+# table(sample_info_umap$Time_point)
+# table(sample_info_umap$Tissue)
+
+Cols <- c("Exon5_33_cKIT.mut","AML_Subtype","Batch","Tissue")
+all(Cols %in% colnames(sample_info_CBFB))
+```
+
+
+```{r}
+
+TPM_CBFB <- TPM[,sample_info_CBFB$Sample]
+
+keep <- rowSums(TPM_CBFB >= 1.0) > 0.025*ncol(TPM_CBFB)
+TPM_CBFB <- TPM_CBFB[keep,]
+log2TPM_CBFB <- log2(TPM_CBFB+1)
+
+dim(log2TPM_CBFB) 
+
+# Mean vs Dispersion Feature Selection 
+obj <- seqGlue::calc_dispersion(as.matrix(TPM_CBFB), removeOutliers = TRUE) #removes outlier genes/transcripts based on cooks distance
+gc()
+
+selGenes_TPM <- seqGlue::get_selected_genes(seqGlue::select_genes(obj, top_n=NULL))
+log2TPM_CBFB <- log2TPM_CBFB[selGenes_TPM,]
+log2TPM_CBFB_scale <- scale(log2TPM_CBFB, center=TRUE, scale=T)
+
+# head(log2TPM_CBFB[,1:5])
+dim(log2TPM_CBFB) #4453  188
+any(rowSums(log2TPM_CBFB) == 0)
+range(log2TPM_CBFB_scale)
+```
+
+
+```{r}
+suppressPackageStartupMessages(library(DelayedArray))
+#Filter low counts
+cts_CBFB <- cts[,sample_info_CBFB$Sample]
+keep <- rowSums(edgeR::cpm(cts_CBFB)) >= 0.05*ncol(cts_CBFB)
+cts_CBFB <- cts_CBFB[keep,] #23,556   120
+
+#size factor scaling 
+lib_total <- apply(cts_CBFB, 2, sum)
+geomean <- exp(mean(log(lib_total)))
+sf <- lib_total/geomean
+sf.scaled <- t(t(cts_CBFB)/sf)
+
+#TF-IDF Norm
+tf <- seqGlue::tf_idf_transform(matrix = as.matrix(sf.scaled))
+tf_log <- seqGlue::tf_idf_transform(matrix= as.matrix(log2(sf.scaled+1)))
+
+gc()
+
+# Mean vs Dispersion Feature Selection 
+obj <- seqGlue::calc_dispersion(as.matrix(sf.scaled), removeOutliers = TRUE) #removes outlier genes/transcripts based on cooks distance
+gc()
+
+selGenes <- seqGlue::get_selected_genes(seqGlue::select_genes(obj, top_n=NULL))
+tf <- tf[selGenes,]
+tf_log <- tf_log[selGenes,]
+
+# head(tf[,1:5])
+dim(tf) 
+dim(tf_log) 
+```
+
+
+```{r fig.height=4, fig.width=15}
+colors37 = c("#466791","#60bf37","#953ada","#4fbe6c","#ce49d3","#a7b43d","#5a51dc","#d49f36","#552095","#507f2d","#db37aa","#84b67c","#a06fda","#df462a","#5b83db","#c76c2d","#4f49a3","#82702d","#dd6bbb","#334c22","#d83979","#55baad","#dc4555","#62aad3","#8c3025","#417d61","#862977","#bba672","#403367","#da8a6d","#a79cd4","#71482c","#c689d0","#6b2940","#d593a7","#895c8b","#bd5975")
+
+# barplot(rep(1,37), col=colors37, names.arg = colors37, las=2)
+
+df <- sample_info_CBFB %>% 
+  dplyr::select(all_of(Cols))
+
+
+cc <- colorCodes_aheatmap(df=df)
+cc[["Exon5_33_cKIT.mut"]] <- c("red1","red4","pink4","cyan2")
+names(cc[["Exon5_33_cKIT.mut"]]) <- unique(df$Exon5_33_cKIT.mut)
+
+par(mar=c(10,4,4,4))
+barplot(rep(1,length(cc$Exon5_33_cKIT.mut)), col=cc$Exon5_33_cKIT.mut, names.arg = names(cc$Exon5_33_cKIT.mut), las=2)
+```
+
+```{r}
+samples_vector <- pull(sample_info_CBFB, Sample)
+
+umap.cbf <- UMAP_workflow(TFIDF_Matrix = tf_log, 
+                                input_features = selGenes,
+                                samples_vector = samples_vector, 
+                                sample_info_df = sample_info_CBFB,
+                                min_dist=0.05,
+                                n_neighbors=3L,
+                                cc = cc, 
+                                k2=20,res2=0.2,
+                                Columns_for_Plots = Cols,
+                                addl_color_vector = colors37)
+
+# umap.cbf
+
+length(umap.cbf)
+
+# saveRDS(umap.cbf, "CBFB.MYH11_Results/UMAP/TARGET_AML_dx_CBFB-MYH11_UMAP_sg6218_md.05_nn10_TFIDF.RDS")
+
+```
+
+```{r}
+# umap.cbf <- readRDS("CBFB.MYH11_Results/UMAP/TARGET_AML_dx_CBFB-MYH11_UMAP_sg6388_log2.RDS")
+```
+
+```{r}
+sample_info_CBFB %>% 
+  group_by(Group=Exon5_33_cKIT.mut) %>% 
+  summarise(Median_BM_Blasts=median(Bone.marrow.leukemic.blast.percentage....,
+                                 na.rm = T),
+            Range_BM_Blast=paste(range(Bone.marrow.leukemic.blast.percentage...., na.rm=T), collapse = "-"),
+            Median_PB_Blasts=median(Peripheral.blasts...., na.rm=T)) 
+  # write.csv(., "CBFB.MYH11_Results/UMAP/CBFB-MYH11_Blast_Percentages.csv",
+  #           row.names = F)
+  
+```
+
+```{r fig.height=7, fig.width=10}
+umap.cbf$Num_PCs
+dim(tf_log)
+length(umap.cbf$input_features)
+```
+
+```{r fig.height=5}
+umap.cbf$umap_2D_scatter
+umap.cbf$cluster_plots2
+```
+
+```{r}
+# pdf("CBFB.MYH11_Results/UMAP/TARGET_AML_dx_CBFB-MYH11_UMAP_sg6388_log2_scatter2D.pdf", height = 12, width = 10)
+# pdf("CBFB.MYH11_Results/UMAP/TARGET_AML_dx_CBFB-MYH11_UMAP_sg6218_scatter2D.pdf", height = 12, width = 10)
+# gridExtra::grid.arrange(grobs=c(umap.cbf$umap_2D_scatter),ncol=2)
+# dev.off()
+
+# pdf("CBFB.MYH11_Results/UMAP/TARGET_AML_dx_CBFB-MYH11_UMAP_sg6388_log2_clusterNumber.pdf", height = 7, width = 10)
+# pdf("CBFB.MYH11_Results/UMAP/TARGET_AML_dx_CBFB-MYH11_UMAP_sg6218_clusterNumber.pdf", height = 7, width = 10)
+# gridExtra::grid.arrange(grobs=c(umap.cbf$cluster_plots2), ncol=2)
+# dev.off()
+
+
+# umap.cbf$cluster_plots1
+```
+
+```{r}
+umap.cbf$umap_res <- umap.cbf$umap_res %>%  
+  select(x:Sample,cluster_k5, Exon5_33_cKIT.mut,Fusion_Breakpoint,
+         Fusion_Breakpoint_Unmasked, Primary.Fusion=Primary.Fusion.y,
+         everything()) %>%
+  mutate(cluster=cluster_k5)
+  
+
+# dim(umap.cbf$umap_res)
+# head(umap.cbf$umap_res[,1:10])
+
+
+
+table(umap.cbf$umap_res$cluster_k5,
+      umap.cbf$umap_res$Exon5_33_cKIT.mut)
+
+table(umap.cbf$umap_res$Exon5_33_cKIT.mut)
+
+
+# write.csv(umap.cbf$umap_res, "CBFB.MYH11_Results/DE_Analysis/TARGET_AML_dx_CBFB-MYH11_RUNX1-RUNX1T1_UMAP_sg6374_11.03.20.csv", row.names = FALSE)
+```
+
+```{r}
+p.cbf1 <- ggplot(umap.cbf$umap_res, aes(x=x,y=y, color=Exon5_33_cKIT.mut)) +
+  geom_point(alpha=0.75) +
+  geom_point(data=filter(umap.cbf$umap_res,
+                         Exon5_33_cKIT.mut == "Inv16/Other_Exons"),
+             mapping=aes(x=x,y=y,fill=Exon5_33_cKIT.mut,
+                         color=Exon5_33_cKIT.mut),
+             alpha=0.85, show.legend = F) +
+  stat_ellipse(data=umap.cbf$umap_res, 
+               mapping=aes(x=x,y=y,fill=cluster_k5, group=cluster_k5),
+               color="grey",
+               # geom="polygon",
+               alpha=0.5,
+               type="norm",level = 0.95,
+               inherit.aes = F, 
+               show.legend = F) +
+  labs(x="umap_1", y="umap_2", title="UMAP Clustering of CBFB-MYH11 AML") +
+  scale_color_manual(values=cc$Exon5_33_cKIT.mut) +
+  # scale_color_gradient(low="red1",high="red4") +
+  theme_classic()
+
+
+p.cbf1
+# ggsave(plot = p.cbf1, filename = "CBFB.MYH11_Results/TARGET_AML_dx_CBFB-MYH11_RUNX1-RUNX1T1_UMAP_sg4107_UMAP_2Dscatter.svg", height = 5, width=7, units="in", device = "svg")
+
+# p.cbf2 <- ggplot(umap.cbf$umap_res, aes(x=x,y=z, color=Exon5_33_cKIT.mut)) +
+#   geom_point(alpha=0.75) +
+#   geom_point(data=filter(umap.cbf$umap_res, Exon5_33_cKIT.mut == "Inv16/Other_Exons"),
+#              mapping=aes(x=x,y=z,fill=Exon5_33_cKIT.mut, color=Exon5_33_cKIT.mut),
+#              alpha=0.85, show.legend = F) +
+#   stat_ellipse(data=umap.cbf$umap_res, 
+#                mapping=aes(x=x,y=z,group=cluster_k3), 
+#                color="grey",
+#                type="norm",level = 0.95, inherit.aes = F, show.legend = F) +
+#   labs(x="umap_1", y="umap_3", title="UMAP Clustering of CBFB-MYH11 AML") +
+#   scale_color_manual(values=cc$Exon5_33_cKIT.mut) +
+#   theme_classic()
+# 
+# p.cbf2
+```
+
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

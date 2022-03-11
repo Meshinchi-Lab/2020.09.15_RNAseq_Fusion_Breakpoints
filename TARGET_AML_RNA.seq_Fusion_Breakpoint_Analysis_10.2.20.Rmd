@@ -1,0 +1,302 @@
+---
+title: "Define Fusion Breakpoint Supporting reads"
+author: "Jenny Smith"
+date: "8/22/2020"
+output: html_document
+---
+
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2020.09.15_RNAseq_Fusion_Breakpoints"))
+
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+
+
+options(stringsAsFactors = FALSE,bitmapType = 'cairo', device='x11')
+grDevices::X11.options(type='cairo')
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+# library(xlsx)
+library(DeGSEA)
+getwd()
+```
+
+```{r}
+# source(file.path(SCRIPTS,"survival_analysis/Survplot_Functions_2018.10.24.r"))
+```
+
+
+#Define Functions
+
+```{r}
+source(file.path(SCRIPTS,"RNAseq_Analysis/Analysis/Fusions_Analysis/Breakpoint_Analysis_Function_10.2.20.r"))
+```
+
+```{r}
+#Function to great a fusion category by alphabetical order, for easier grouping variables when dealing with the reciprocal fusions
+fusion_category <- function(geneA,geneB){
+  fusion <- c(geneA,geneB)[order(c(geneA,geneB))]
+  fusion <- paste(fusion, collapse="-")
+  return(fusion)
+}
+```
+
+```{r}
+#Function to sort breakpoints for easier matching of identical breakpoints across different datasets
+order_breakpoints <- function(brkpt){
+  split <- str_split(brkpt, pattern = "\\|")[[1]] 
+  ord <- split[order(split)]
+  ord <- paste(ord,collapse = "|")
+  return(ord)
+}
+```
+
+
+#ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_9.18.20.csv"))
+
+megred <- merged %>% 
+  filter(USI != "Unknown") %>% 
+  as.data.frame() %>%
+  set_rownames(.$USI)
+
+dim(megred)
+```
+
+```{r}
+# dir(file.path(TARGET, "SequencingDataMatrix/"))
+manifest <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Master_Manifest_8.5.20.csv"),row.names = 1) 
+
+dim(manifest)
+head(manifest)
+```
+
+```{r}
+IDmap <- read.csv("References/St.Jude_TARGET_CICERO_Sample_IDmap.csv")
+
+head(IDmap)
+```
+ 
+ 
+#Read in File Manifests 
+
+```{r}
+polyA_RNAseq_files <- read.csv("BAM_Manifests/TARGET_AML_polyA_RNAseq_Bam_Manifest_10.02.20.csv", 
+                               row.names = 1) %>% 
+  mutate_at(vars(Sample), 
+            ~ifelse(grepl("HD_NBM",Batch), paste0(., "_replicate"), . ))
+
+
+dim(polyA_RNAseq_files)
+table(duplicated(polyA_RNAseq_files$Sample)) #FALSE
+```
+
+```{r}
+RBD_RNAseq_files <- read.csv("BAM_Manifests/TARGET_AML_Ribodepleted_RNAseq_Bam_Manifest_10.02.20.csv", 
+                             row.names = 1)
+
+dim(RBD_RNAseq_files)
+table(duplicated(RBD_RNAseq_files$Sample)) 
+```
+
+
+#Fusion Data 
+
+```{r message=FALSE, warning=FALSE}
+fusions <- read_csv(file.path(PROJHOME, "2018.09.11_Combine_Fusion_Calls/Combined_withConfidence_Intervals/TARGET_AML_0531_1031_Relapse_Combined_STAR_TransAbyss_CICERO_FusionCalls_withConfidenceLevels_Annotated_6.17.2020.csv")) %>% 
+  select(Sample=Patient, everything())
+
+
+dim(fusions) #178667    175
+# fusions$All_Fusions_Called
+```
+
+
+#Read in the Contig Sequences
+
+```{r message=FALSE, warning=FALSE}
+TA.contigs <- read.csv("Data/TransAbyss_Contig_Sequences.csv")
+
+head(TA.contigs)
+dim(TA.contigs) #54878     4
+```
+
+```{r message=FALSE}
+cicero.contig <- read.csv("Data/CICERO_Contig_Sequences.csv")
+
+head(cicero.contig)
+dim(cicero.contig) #158,972 
+```
+
+#Read in the Theoretical Junc Sequences
+
+```{r}
+theoretical_data.collapsed <- read.csv("Data/Theoretical_Fusion_Breakpoint_Junctions_per_Transcript.csv")
+
+head(theoretical_data.collapsed)
+dim(theoretical_data.collapsed) #1925    4
+``` 
+
+```{r}
+mutseq <- read.csv("Data/HutchFusion_neoSplice_Fusion_Junctions.csv") %>% 
+  mutate(Fusion.Category)
+
+head(mutseq)
+dim(mutseq)
+table(mutseq$Fusion.Category)
+```
+
+```{r}
+seqlens <- read.delim("Data/Grch37.lite_chrom_lengths.txt") %>% 
+  rownames_to_column("chr") %>%
+  pull(x, name=chr)
+
+head(seqlens)
+```
+
+
+#Define Fusion Groups 
+
+```{r}
+Groups <- unique(theoretical_data.collapsed$Fusion.Category)
+
+Groups
+```
+
+
+#Define defaults
+
+I just need a breakpoint, but since I'll be searching for evidence in the RNAseq reads for the whole chromosome, ne need to exact input data per patient. 
+
+```{r}
+common_breakpoints <- read.csv("Data/TARGET_AML_Most_Common_Breakpoints.csv", row.names = 1)
+common_breakpoints
+```
+
+
+
+0. Sample_ID
+- simply a unique string
+-input files cannot have duplicate Sample_IDs? so cannot test more than 1 fusion at a time?
+
+1. Breakpoint
+- a list of character vector(s)
+
+example b=list("16:1000000|16:2000000")
+
+2. file_manifest
+- Sample
+- filepath
+
+Must have one bam file per patient ID.
+
+3. Seqlens
+-named vector 
+contains full length of the chromosome by numbers 
+Need to make the "grep" of the chromosome number more generalized
+
+4. mutseq 
+- Name
+- Mut20
+- Fusion.Category
+
+input dataframe from Xiaotu 
+
+5. fusion_theoretical
+-Name
+-SeqExon
+- Fusion.Category
+
+input dataframe from Xiaotu
+
+6. cicero.contig
+- Sample
+- Fusion.Category
+- contig
+
+must be dataframe
+
+7. TA.contigs
+- Sample
+- Fusion.Category
+- contig
+
+must be dataframe 
+
+```{r}
+library(furrr)
+future::plan("multisession")
+```
+
+```{r}
+results <- list()
+for ( i in 1 ){
+  #The fusion group to investigate
+  group <- Groups[i]
+  print(group)
+  
+  #Filter the sequence data for the fusion to investigate
+  breakpoint <- common_breakpoints[group,"breakpoint"]
+  mutseq_input <- filter(mutseq, Fusion.Category == group)
+  fusion_theoretical_input <- filter(theoretical_data.collapsed, Fusion.Category == group)
+  cicero.contig_input <- filter(cicero.contig, Fusion.Category ==  group)
+  TA.contigs_input <- filter(TA.contigs, Fusion.Category == group)
+
+
+  tmp <- polyA_RNAseq_files %>% 
+    filter(grepl("CBFB-MYH11|CBFA2T3-GLIS2|No.Primary.Fusion ",AML_Subtype))
+  
+  print(tictoc::tic())
+  samps <- pull(tmp, Sample)
+  polyA_evidence <- furrr::future_map_dfr(samps,
+                        examine_breakpoint_evidence, 
+                        breakpoint = breakpoint,
+                        file_manifest = polyA_RNAseq_files,
+                        Seqlens = seqlens, 
+                        mutseq = mutseq_input, 
+                        fusion_theoretical = fusion_theoretical_input, 
+                        cicero.contig = cicero.contig_input, 
+                        TA.contigs = TA.contigs_input)
+  print(tictoc::toc())
+  results[[group]] <- polyA_evidence
+
+}
+
+
+
+```
+
+NOTE: check out TARGET.20.PAPYUI.09A.01R - loss of  4 reads evidence due to differentce bween Mutseq20 and 
+
+
+  # polyA_evidence <- examine_breakpoint_evidence(Sample_ID=Sample,
+  #                                          breakpoint = breakpoint,
+  #                                          file_manifest = polyA_RNAseq_files,
+  #                                          Seqlens = seqlens, 
+  #                                          mutseq = mutseq_input, 
+  #                                          fusion_theoretical = fusion_theoretical_input, 
+  #                                          cicero.contig = cicero.contig_input, 
+  #                                          TA.contigs = TA.contigs_input)
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

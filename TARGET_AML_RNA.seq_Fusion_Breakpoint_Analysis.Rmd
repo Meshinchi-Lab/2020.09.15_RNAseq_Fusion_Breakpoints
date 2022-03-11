@@ -1,0 +1,866 @@
+---
+title: "Define Fusion Breakpoint Supporting reads"
+author: "Jenny Smith"
+date: "8/22/2020"
+output: html_document
+---
+
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2020.09.15_RNAseq_Fusion_Breakpoints"))
+
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+
+
+options(stringsAsFactors = FALSE,bitmapType = 'cairo', device='x11')
+grDevices::X11.options(type='cairo')
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(xlsx)
+library(purrr)
+
+
+getwd()
+```
+
+```{r}
+source(file.path(SCRIPTS,"survival_analysis/Survplot_Functions_2018.10.24.r"))
+```
+
+
+#Define Functions
+
+```{r}
+source(file.path(SCRIPTS,"RNAseq_Analysis/Analysis/Fusions_Analysis/Breakpoint_Analysis_Function.r"))
+```
+
+```{r}
+#Function to great a fusion category by alphabetical order
+fusion_category <- function(geneA,geneB){
+  fusion <- c(geneA,geneB)[order(c(geneA,geneB))]
+  fusion <- paste(fusion, collapse="-")
+  return(fusion)
+}
+```
+
+```{r}
+#Function to sort breakpoints for easier matching of identical breakpoints across different datasets
+order_breakpoints <- function(brkpt){
+  split <- str_split(brkpt, pattern = "\\|")[[1]] 
+  ord <- split[order(split)]
+  ord <- paste(ord,collapse = "|")
+  return(ord)
+}
+```
+
+
+#ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_9.18.20.csv"))
+
+megred <- merged %>% 
+  filter(USI != "Unknown") %>% 
+  as.data.frame() %>%
+  set_rownames(.$USI)
+
+dim(megred)
+```
+
+```{r}
+# dir(file.path(TARGET, "SequencingDataMatrix/"))
+manifest <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_10.08.20.csv"),
+                     row.names = 1) 
+
+dim(manifest)
+head(manifest)
+```
+
+```{r}
+IDmap <- read.csv("References/St.Jude_TARGET_CICERO_Sample_IDmap.csv")
+
+head(IDmap)
+```
+ 
+
+
+#Fusion Data 
+
+```{r message=FALSE, warning=FALSE}
+fusions <- read_csv(file.path(PROJHOME, "2018.09.11_Combine_Fusion_Calls/Combined_withConfidence_Intervals/TARGET_AML_0531_1031_Relapse_Combined_STAR_TransAbyss_CICERO_FusionCalls_withConfidenceLevels_Annotated_6.17.2020.csv")) %>% 
+  select(Sample=Patient, everything())
+
+
+dim(fusions) #178667    175
+# fusions$All_Fusions_Called
+```
+
+
+```{r}
+Groups <- c("CBFB-MYH11","KMT2A-MLLT10","KMT2A-MLLT3", 
+            "NSD1-NUP98", "RUNX1-RUNX1T1",
+            "CBFA2T3-GLIS2")
+
+common_breakpoints <- fusions %>% 
+  filter(Fusion.Category %in% Groups,
+         Group=="AML", Time_point=="diagnostic") %>% 
+  rowwise() %>%
+  mutate(breakpoint=case_when(
+    !is.na(breakpoint.TA) ~ order_breakpoints(breakpoint.TA),
+    is.na(breakpoint.TA) & !is.na(Breakpoints.STAR) ~ order_breakpoints(Breakpoints.STAR),
+    TRUE ~ order_breakpoints(Breakpoint.CICERO)
+    ))  %>% 
+  ungroup() %>%
+  select(Sample,Fusion.Category, breakpoint) %>%
+  group_by(Fusion.Category,breakpoint) %>%
+  summarise(N=n()) %>%
+  arrange(Fusion.Category,desc(N)) %>%
+  slice(1) %>%
+  ungroup() %>% 
+  
+  #need breakpoints with "chr" in the string for BAM files with chr annotations
+  rowwise() %>%
+  mutate(breakpoint_ctat=sapply(str_split(breakpoint,pattern = "\\|"), function(x)
+                                paste0("chr", x)) %>% 
+           paste(., collapse="|")) %>% 
+  ungroup() %>% 
+  select(Fusion.Category, matches("breakpoint"), N) %>% 
+  as.data.frame() %>%
+  set_rownames(.$Fusion.Category)
+
+
+# common_breakpoints
+# write.csv(common_breakpoints,"Data/TARGET_AML_Most_Common_RNAseq_Breakpoints.csv")
+# table(common_breakpoints$Fusion.Category)
+```
+
+```{r message=FALSE, warning=FALSE}
+
+TA.contigs1 <- read_csv(file.path(PROJHOME,"2018.02.05_TransAbyss_Fusion/Batch1/Reformatted_/TARGET_AML_1031_TransAbyss_sense_fusions_reformatted_06.05.18.csv")) %>% 
+  select(-id)
+
+
+TA.contigs2 <- read_csv(file.path(PROJHOME,"2018.02.05_TransAbyss_Fusion/Batch2/Reformatted/TARGET_AML_0531_TransAbyss_sense_fusions_reformatted_4.09.19.csv")) %>% 
+  select(-id)
+
+# table(TA.contigs2$Patient %in% TA.contigs1$Patient)
+# table(TA.contigs1$Patient %in% TA.contigs2$Patient)
+
+TA.contigs <- bind_rows(TA.contigs1, TA.contigs2) %>% 
+  rowwise() %>%
+  mutate(Sample=gsub("-","\\.", Patient),
+         Breakpoint=paste(X5.breakpoint,X3.breakpoint,sep="|"),
+         Fusion.Category=fusion_category(X3.gene,X5.gene)) %>% 
+  ungroup() %>%
+  mutate_at(vars(Sample), ~case_when(
+    !grepl("^TARGET", .) ~ paste0("TARGET.20.", Sample),
+    TRUE ~ Sample)) %>% 
+  select(Sample,Patient:Exons,Fusion.Category,Breakpoint, contig=probe) %>%
+  unique()
+
+head(TA.contigs)
+dim(TA.contigs) #72629    46 (54878 rows are unique)
+rm(TA.contigs1, TA.contigs2)
+# write.csv(select(TA.contigs,Sample,Fusion.Category,Breakpoint, contig),"Data/TransAbyss_Contig_Sequences.csv", row.names = FALSE)
+```
+
+
+```{r message=FALSE}
+cicero.contig <- read_csv(file.path(PROJHOME,"2020.04.13_CICERO_St.Jude/CICERO_raw/TARGET_AML_0531_1031_Relapse_CICERO_fusions_reformatted_6.4.20.csv")) %>% 
+  select(USI, Sample=Patient, SJ_ID=Sample.s., Fusion_Type:Fusion.Category,Breakpoint,contig) %>% 
+  unique()
+
+head(cicero.contig)
+# dim(cicero.contig) #171,422      9 (158,972 after unqiue)
+# write.csv(select(cicero.contig, Sample, Fusion.Category, Breakpoint, contig), "Data/CICERO_Contig_Sequences.csv",
+#           row.names = FALSE)
+```
+
+
+```{r}
+theoretical_data <- read.delim(file.path(PROJHOME,"2020.09.15_RNAseq_Fusion_Breakpoints/References/Theoritical_Fusion_Breakpoints_forJenny_fromX.Ma.txt"),sep = "\t") %>% 
+  mutate(Fusion=paste(geneA,geneB, sep="-")) %>% 
+  rowwise() %>%
+  mutate(Fusion.Category=fusion_category(geneA, geneB)) %>% 
+  ungroup() %>%
+  select(Fusion,Fusion.Category, everything())
+
+head(theoretical_data)
+dim(theoretical_data) #72316    45
+```
+
+
+```{r}
+#Collapse identical fusion junction sequences
+theoretical_data.collapsed <- theoretical_data %>% 
+  filter(cdsFuseOK == "GoodFusion") %>%
+  mutate(seqLengthsA=nchar(SeqExonA), 
+         seqLengthsB=nchar(SeqExonB)) %>%
+  
+  mutate(Fusion_txs=paste(refseqA,refseqB, sep="_"),
+         Exons=paste(exonNumberA, exonNumberB,sep="_"),
+         #CDS lengths are more variable - thus making it much more difficult for pdict object which cannot accept differing lengths.
+         # SeqCDS=paste0(substr(SeqCDSA, 26, 50), substr(SeqCDSB, 1, 25)),
+         SeqExon=paste0(substr(SeqExonA,
+                               start = c(seqLengthsA-24),
+                               stop = seqLengthsA),
+                        substr(SeqExonB,
+                               start = 1, 
+                               stop = 25))) %>% 
+  
+  mutate(Name=paste(Fusion_txs,paste0("Exons", Exons),sep="--")) %>%
+  
+  #group by different combinations of txs and exon breakpoints
+  #then collapse the combinations with identical breakpoint junctions
+  group_by(Fusion.Category, SeqExon) %>% 
+  mutate(Name=paste(Name, collapse="|")) %>%
+  ungroup() %>% 
+  
+  #Remove the duplicated sequences 
+  group_by(Fusion.Category) %>%
+  filter(!duplicated(SeqExon)) %>% 
+  ungroup() %>%
+  arrange(Fusion.Category) %>%
+  select(Fusion,Fusion.Category,Name,Sequence=SeqExon)
+
+
+head(theoretical_data.collapsed)
+dim(theoretical_data.collapsed) #1907    4
+# table(theoretical_data.collapsed$Fusion.Category)
+# table(theoretical_data.collapsed$Fusion)
+quantile(sapply(theoretical_data.collapsed$Sequence, nchar)) #all the same length - 50 bp
+``` 
+
+```{r}
+files <- dir("References", pattern = "HutchFusion_neoSplice_", full.names = T)
+
+mutseq <- map_dfr(files, read.xlsx, sheetIndex=1) %>% 
+  separate(GeneName, into = c("GeneA","GeneB"),sep = "_", remove = F) %>% 
+  rowwise() %>% 
+  mutate(Fusion.Category=fusion_category(GeneA, GeneB)) %>% 
+  ungroup() %>% 
+  
+  select(SJ_Barcode=Sample, Patient_ID=USI, everything(), -SJID) %>% 
+  mutate_at(vars(Isoform), ~ifelse(is.na(.), Isos, .)) %>%
+  mutate_at(vars(Patient_ID), ~gsub("_srt", "", gsub("_RBS","", .))) %>%
+  mutate(Name=paste0(Isoform,"--Exons",Exons,"_Mutseq20"),
+         Sample=gsub("-","\\.", Patient_ID),
+         USI=str_split_fixed(Patient_ID,"-",n=5)[,3]) %>%
+  select(SJ_Barcode,Sample, Patient_ID, USI,Name,
+         Fusion.Category, everything())  %>%
+  arrange(Sample)
+
+head(mutseq)
+# tail(mutseq)
+dim(mutseq) #562  24
+
+table(mutseq$GeneName)
+table(mutseq$Fusion.Category)
+
+
+mut20 <- mutseq %>% 
+    select(GeneName, Fusion.Category, Name,Sequence=Mut20) %>%
+    #Tally the number of patients with mut20 sequence
+    # group_by(Fusion.Category, Sequence) %>%
+    # mutate(N=n()) %>% 
+    # ungroup() %>%
+  
+    #Remove the duplicated sequences 
+    group_by(Fusion.Category) %>%
+    filter(!duplicated(Sequence)) %>% 
+    ungroup() %>%
+    arrange(Fusion.Category) %>%
+    select(Fusion=GeneName, Fusion.Category, Name, Sequence)
+
+
+head(mut20)
+dim(mut20) # 48  4
+# quantile(sapply(mut20$Sequence, nchar)) #OK all 40
+```
+
+
+```{r}
+all_sequences <- theoretical_data.collapsed %>% 
+  bind_rows(mut20)
+
+# head(all_sequences)
+# tail(all_sequences)
+dim(all_sequences)
+
+# write.csv(all_sequences,"Data/Theoretical_Fusion_Breakpoint_Junctions_per_Transcript.csv", row.names = FALSE)
+```
+
+
+
+
+
+#Reference Genome 
+
+```{r}
+suppressPackageStartupMessages(library(Biostrings))
+# library(BSgenome)
+```
+
+Will have to likely forge my own genome... but for godsake why is it sooo confusing. dont like a single vignette written by herve. confusing all of them. 
+
+https://www.biostars.org/p/159243/
+https://bioconductor.org/packages/release/bioc/vignettes/BSgenome/inst/doc/BSgenomeForge.pdf
+https://bioconductor.org/packages/release/bioc/vignettes/BSgenome/inst/doc/GenomeSearching.pdf
+
+http://web.mit.edu/~r/current/arch/i386_linux26/lib/R/library/GenomicRanges/doc/GenomicRangesHOWTOs.Rnw
+
+*one based or zero based* 
+https://www.biostars.org/p/84686/
+
+Why does all this matter?
+
+Moving from UCSC browser/tools to Ensembl browser/tools or back
+- Ensembl uses 1-based coordinate system
+- UCSC uses 0-based coordinate system
+- file formats are 1-based (GFF, SAM, VCF) 
+- file formats  are 0-based (BED, BAM)
+- See this excellent post and its many good links for more info:
+What are the advantages/disadvantages of one-based vs. zero-based genome coordinate systems
+
+
+```{r eval=FALSE}
+Grch37.lite <- file.path(GENREFS,"GRCh37/fasta/genome/Grch37-lite/GRCh37-lite.fa")
+# seqlens <- fasta.seqlengths(Grch37.lite)
+# write.table(seqlens,"Grch37.lite_chrom_lengths.txt",sep="\t",quote = F)
+```
+
+```{r}
+Grch37.ctat <- file.path(SCRATCH,"jlsmith3/ctat_genome_lib_build_dir/ref_genome.fa")
+seqlens.ctat <- fasta.seqlengths(Grch37.ctat)
+
+head(seqlens.ctat)
+# write.table(seqlens.ctat,"Data/Grch37.ctat_chrom_lengths.txt",sep="\t",quote = F)
+```
+
+```{r}
+seqlens <- read.delim("Data/Grch37.lite_chrom_lengths.txt") %>% 
+  rownames_to_column("chr") %>%
+  pull(x, name=chr)
+
+# head(seqlens)
+```
+
+
+#Implementation Plans
+
+- right now, I simply parallelized by using SLURM with Rscript. Each sample was independently processed. 
+  - Need to fix
+    A) too many input files (7 total)
+    B) Creating dummy data currently for "fusion_data" file. Should not have to do this
+    D) Need a database or list with the contig data 
+    C) Need to make into an R package for Rslurm or furrr parallelization
+
+
+#Define Fusion Groups 
+
+```{r}
+Groups <- unique(theoretical_data.collapsed$Fusion.Category)
+```
+
+
+I just need a breakpoint, but since I'll be searching for evidence in the RNAseq reads for the whole chromosome, ne need to exact input data per patient. 
+
+```{r}
+order_breakpoints <- function(brkpt){
+  split <- str_split(brkpt, pattern = "\\|")[[1]] 
+  ord <- split[order(split)]
+  ord <- paste(ord,collapse = "|")
+  return(ord)
+}
+```
+
+
+```{r}
+common_breakpoints <- fusions %>% 
+  filter(Fusion.Category %in% Groups,
+         Group=="AML", Time_point=="diagnostic") %>% 
+  rowwise() %>%
+  mutate(breakpoint=case_when(
+    !is.na(breakpoint.TA) ~ order_breakpoints(breakpoint.TA),
+    is.na(breakpoint.TA) & !is.na(Breakpoints.STAR) ~ order_breakpoints(Breakpoints.STAR),
+    TRUE ~ order_breakpoints(Breakpoint.CICERO)
+    ))  %>% 
+  ungroup() %>%
+  select(Sample,Fusion.Category, breakpoint) %>%
+  group_by(Fusion.Category,breakpoint) %>%
+  summarise(N=n()) %>%
+  arrange(Fusion.Category,desc(N)) %>%
+  slice(1) %>%
+  ungroup()
+
+
+common_breakpoints
+# write.csv(common_breakpoints,"Data/TARGET_AML_Most_Common_RNAseq_Breakpoints.csv", row.names = FALSE)
+# table(common_breakpoints$Fusion.Category)
+```
+
+
+General "Harmonized" Inputs
+
+0. Sample_ID
+- simply a unique string
+-input files cannot have duplicate Sample_IDs? so cannot test more than 1 fusion at a time?
+
+1. fusion_data
+- Sample (must contain Sample_ID)
+- Fusion.Category
+-breakpoint.TA *delimiter is a pipe*
+-Breakpoints.STAR *delimiter is a pipe*
+
+the issue here being that samples that are fusion-negative still require the same
+bam subsetting... so I dont know how to easily remove the need for a dummy data..
+
+
+
+2. file_manifest
+- Sample
+- filepath
+Must have one bam file per patient ID.
+
+3. Seqlens
+-named vector 
+contains full length of the chromosome by numbers
+Need to make the "grep" of the chromosome number more generalized
+
+4. mutseq 
+- Name
+- Mut20
+input dataframe from Xiaotu 
+
+5. fusion_theoretical
+-Name
+-SeqExon
+input dataframe from Xiaotu
+
+6. cicero.contig
+- Sample
+- Fusion.Category
+- contig
+must be dataframe
+
+7. TA.contigs
+- Sample
+- Fusion.Category
+- contig
+
+must be dataframe 
+
+#CBFB-MYH11 
+
+## Input Data Set-up 
+
+```{r}
+AAML1031 <- filter(fusions, 
+                   (Protocol=="AAML1031" & Group=="AML") | (Group == "NBM") ) %>% 
+  pull(Patient) %>% 
+  unique()
+
+
+#RBD fusion results first 
+A_cbfb_myh11 <- fusions %>% 
+  filter(Protocol=="AAML1031") %>%
+  filter(grepl("CBFB-MYH11", Fusion.Category), Group=="AML")  %>% 
+  select(Sample=Patient,USI,SJ_ID,Time_point,Protocol,breakpoint_comparison:Fusion.Category,
+         matches("^[bB]reakpoints?\\.|^Alternate|contig")) %>%
+
+  #Adding in Dummy Data - so this is not ideal 
+  add_row(Sample=setdiff(AAML1031, .$Sample),
+          Fusion.Category="CBFB-MYH11",
+          breakpoint.TA=c("16:15814908|16:67116211")) %>% 
+  filter(!grepl("TARGET.20.PAWZVT.09A.01R", Sample)) %>% #No BAM file
+  arrange(Sample) 
+
+
+dim(A_cbfb_myh11) #1423
+any(duplicated(A_cbfb_myh11$Sample)) #FALSE
+```
+
+```{r}
+#BAM files to subset for CBFB-MYH11
+B_cbfb_myh11_files <- rbd.bam.manifest %>% 
+  filter((Protocol=="AAML1031" & Group=="AML") | Group == "NBM") %>%
+  filter(Sample %in% A_cbfb_myh11$Sample)
+
+
+# head(cbfb_myh11_files)
+dim(B_cbfb_myh11_files) #119  18
+# any(duplicated(B_cbfb_myh11_files$Sample)) #FALSE
+# any(duplicated(B_cbfb_myh11_files$filepath))  #FALSE
+# all(B_cbfb_myh11_files$Sample %in% A_cbfb_myh11$Sample) #TRUE
+```
+
+```{r warning=FALSE}
+#Computationally derived sequences from Xiaotu
+C_CBFB_mutseq <- read.xlsx(file.path(PROJHOME,"2020.09.15_RNAseq_Fusion_Breakpoints/References/HutchFusion_neoSplice_CBFB.xlsx"), sheetIndex = 1) %>%
+  select(SJ_Barcode=Sample,SJ_ID=SJID,Patient_ID=USI, everything()) %>% 
+  mutate_at(vars(Patient_ID), ~gsub("_srt", "", gsub("_RBS","", .))) %>% 
+  mutate(Name=paste0(Isoform,"--Exons",Exons,"_Mutseq20"),
+         Sample=gsub("-","\\.", Patient_ID),
+         USI=str_split_fixed(Patient_ID,"-",n=5)[,3]) %>% 
+  select(SJ_Barcode,SJ_ID,Sample, Patient_ID, USI,Name, everything())  %>% 
+  arrange(Sample)
+
+
+dim(C_CBFB_mutseq)#92 23
+head(C_CBFB_mutseq)
+# table(C_CBFB_mutseq$Name %in% D_CBFB_theoretical$Name)
+table(duplicated(C_CBFB_mutseq$Sample))
+table(duplicated(C_CBFB_mutseq$USI))
+
+
+#For Soheil 
+Soheil_CBFB_mutseq <- C_CBFB_mutseq %>%
+  left_join(., merged, by="USI") %>%
+  select(SJ_Barcode:CiceroContig,
+         ISCN,Primary.Fusion,Primary.CNV,Additional.Fusions.CNV,
+         everything()) %>% 
+  mutate(CBFB_MYH11_Junction=ifelse(Exons=="5_33","Exon5_33","Other_Exons"))
+  
+# dim(Soheil_CBFB_mutseq)
+# table(Soheil_CBFB_mutseq$CBFB_MYH11_Junction)
+# write.csv(Soheil_CBFB_mutseq,"TARGET_AML_CBFB_MYH11_Exon_Junctions.csv", row.names = FALSE)
+```
+
+
+```{r fig.height=7, fig.width=13}
+df <- filter(Soheil_CBFB_mutseq,!grepl("04A|40A", Sample),
+                               !duplicated(Sample))
+
+df <- bind_rows(df, mutate(df, CBFB_MYH11_Junction="All_Inv16_Juncs"))
+
+# df <-   bind_rows(df,
+#                   filter(merged, grepl("CBFB-MYH11", Primary.Fusion), 
+#                      !USI %in% df$USI) %>%
+#               select(.,  USI,OS.time..days.,OS.ID,EFS.time..days., Event.ID) %>% 
+#               mutate(CBFB_MYH11_Junction="inv.16"))
+
+dim(df) #80 patients
+KM.Exons <- KM.plots(df=df,
+                     group_vars = NULL,
+                     type = "OS",
+                     covariate = "CBFB_MYH11_Junction",cohort = "1031",
+                     riskTable = TRUE)
+
+# pdf("CBFB_MYH11_Results/TARGET_AML_CBFB_MYH11_Exon_Junctions_KM_v3.pdf", height = 6, width = 11)
+grid.arrange(grobs=c(KM.Exons$OS,KM.Exons$EFS),ncol=2)
+# dev.off()
+```
+
+```{r}
+#Additional Computationally derived sequences from Xiaotu
+D_CBFB_theoretical <- theoretical_data %>%
+  filter(grepl("CBFB-MYH11|MYH11-CBFB", Fusion)) %>% 
+  filter(cdsFuseOK == "GoodFusion") %>% 
+  mutate(Fusion_txs=paste(refseqA,refseqB, sep="_"),
+         Exons=paste(exonNumberA, exonNumberB,sep="_"),
+         SeqCDS=paste0(substr(SeqCDSA, 26, 50), substr(SeqCDSB, 1, 25)),
+         SeqExon=paste0(substr(SeqExonA,176,200),substr(SeqExonB,1, 25))) %>% 
+  mutate(Name=paste(Fusion_txs,paste0("Exons", Exons),sep="--")) %>%
+  
+  #group by different combinations of txs and exon breakpoints
+  #then collapse the combinations with identical breakpoint junctions
+  arrange(Name) %>% 
+  group_by(SeqExon) %>% 
+  mutate(Name=paste(Name, collapse="|")) %>%
+  ungroup() %>% 
+  
+  #Remove the duplicated sequences 
+  filter(!duplicated(SeqExon)) %>% 
+  arrange(SeqExon) %>%
+  select(Fusion,Name,SeqExon)
+
+
+dim(D_CBFB_theoretical) #269   3 (after removing duplicates)
+head(D_CBFB_theoretical)
+
+
+# table(CBFB_theoretical$cdsFuseOK, useNA='ifany')
+# BadFusion     GoodFusion      NoCDSFusionCheck 
+# 3546             4722             2484 
+
+
+# length(table(D_CBFB_theoretical$Fusion_txs)) #48 difference transcript combinations examined
+# length(unique(D_CBFB_theoretical$Name)) #4722 all unique combinations of txs and exon junctions
+# table(duplicated(D_CBFB_theoretical$SeqExon))
+# FALSE  TRUE 
+#   269  4453
+
+# length(unique(D_CBFB_theoretical$Name)) #after removing the duplicated junction sequences
+# table(nchar(pull(D_CBFB_theoretical, Name))) #whoa, very long names
+```
+
+```{r}
+# dir.create(file.path(SCRATCH,"jlsmith3","Fusion_Breakpoints"), recursive = T)
+E_seqlens <- seqlens
+F_cicero.contig <- cicero.contig
+G_TA.contigs <- TA.contigs
+
+tosave <- ls(pattern="cbfb|CBFB|E_seqlens|[FG]+.+contig")
+
+
+# lapply(tosave, function(x)
+#   saveRDS(get(x), file.path(SCRATCH,"jlsmith3/Fusion_Breakpoints",paste0(x,".RDS"))))
+
+# write.csv(A_cbfb_myh11[,1:5],file.path(SCRATCH,"jlsmith3/Fusion_Breakpoints/input_samples_CBFB-MYH11.csv"), row.names = F,quote = F,col.names = FALSE)
+```
+
+
+I actaully dont think strand matters, since the way the start and end of exons is always written left to right, regardless of strand.
+Check on on UCSC genome browser using BLAT does show that first bp of the seqExonB map to the start of the appropriate exon. so for trimming the junctions I want remove first 25 bp of CBFB and remove the last 25bp of the MYH11.
+
+CBFB pos strand - left to right - 5' to 3'
+MYH11 neg strand -right to left - 3' to 5' 
+
+##Results
+
+```{bash eval=FALSE}
+cd "/fh/scratch/delete90/meshinchi_s/jlsmith3/Fusion_Breakpoints"
+samples=$(cat input_scamples_CBFB-MYH11.csv | grep -v "Sample" | cut -f 1 -d "," )
+sbatch ~/scripts/sbatch_jobs/fusion_breakpoints_rscript.sh "$samples" 
+#the bash script then invokes fusion_breakpoints_rscript.sh per patient
+```
+
+
+It takes from minimum of 15 min per sample to complete the search of ~10K computation sequences against chr16 RNAseq reads.  Ultimately, the search may be too intensive and the RNA-seq BAM file must be subset further. 
+
+Yes, the memory requirements were still too much even after splitting the computational sequences in half (so ~5000 seqs per search). 602 jobs succeeded and 820 failed due to out-of-memory errors. Possibly also due to the crappy regex I used for the input files..but either way I re-tried for 820 with ~3,000 sequences to search and fixed the regex to read the input files. 
+
+```{r}
+results <- dir(file.path(SCRATCH,"jlsmith3/Fusion_Breakpoints"), 
+               pattern="breakpoint_sequence_evidence.RDS",
+               full.names = T)
+
+# results
+length(results) #1416
+```
+
+```{r}
+true_positives <-  merged %>% 
+  filter(Protocol=="AAML1031") %>%
+  filter((grepl("CBFB-MYH11", Primary.Fusion) | grepl("CBFB-MYH11", Additional.Fusions.CNV))) %>% 
+  pull(USI)
+
+
+cated_fusion_res <- purrr::map_dfr(results, readRDS) %>% 
+  mutate(USI=str_split_fixed(string = Sample,pattern = "\\.", n=5)[,3],
+         True_Positive_CBFB_MYH11=USI %in% true_positives) %>%
+  left_join(., IDmap,by=c("Sample"="Patient")) %>%
+  left_join(.,select(merged, USI, Protocol:Treatment.Arm, 
+                     Cyto.Fusion.Molecular.Risk_update,
+                     M6_AML:M7_AML,FLT3.ITD.positive.:CEBPA.mutation.,
+                     Primary.Fusion, Primary.CNV, Additional.Fusions.CNV)) %>%
+  select(Sample,USI,SJ.ID,Group,
+         True_Positive_CBFB_MYH11,
+         Primary.CNV,Primary.Fusion, Additional.Fusions.CNV,
+         everything())
+
+
+head(cated_fusion_res[,1:10])
+# tail(cated_fusion_res)
+dim(cated_fusion_res) #387,984     48
+
+
+# write.csv(cated_fusion_res,"CBFB_MYH11_Results/TARGET_AML_CBFB-MYH11_Theoretical_Exon_Junctions_RNAseq_Evidence.csv", row.names = F)
+
+# table(cated_fusion_res$True_Positive_CBFB_MYH11)
+# length(unique(cated_fusion_res$Sample)) #1,416 samples
+# length(unique(cated_fusion_res$Theoretical_Exon_Junctions)) #274
+```
+
+```{r}
+CBFB_MYH11_mut20 <- filter(cated_fusion_res, 
+                                      grepl("_Mutseq20", Theoretical_Exon_Junctions),
+                                      Num_Junction_Breakpoint_Reads > 0)
+
+dim(CBFB_MYH11_mut20) #114  48
+# table(CBFB_MYH11_mut20$True_Positive_CBFB_MYH11, useNA='ifany') #114
+# any(duplicated(CBFB_MYH11_mut20$Sample))
+
+# write.csv(CBFB_MYH11_mut20, "CBFB_MYH11_Results/TARGET_AML_CBFB_MYH11_Mut20_Exon_Junctions_RNAseq_Evidence.csv",
+#           row.names = FALSE)
+
+table(CBFB_MYH11_mut20$USI %in% C_CBFB_mutseq$USI)
+# CBFB_MYH11_mut20$Sample[!CBFB_MYH11_mut20$USI %in% C_CBFB_mutseq$USI]
+```
+
+```{r}
+CBFB_MYH11_Theoretical_hits <- filter(cated_fusion_res, 
+                          Num_Junction_Breakpoint_Reads > 0)
+
+
+length(unique(CBFB_MYH11_hits$Sample)) #83
+table(CBFB_MYH11_hits$True_Positive_CBFB_MYH11, useNA='ifany')
+length(unique(CBFB_MYH11_hits$Theoretical_Exon_Junctions)) #152 unique sequneces
+
+
+# write.csv(CBFB_MYH11_hits,"TARGET_AML_AAML1031_CBFB_MYH11_Computational_Breakpoint_Read_Evidence.csv", row.names = F)
+```
+
+
+
+
+
+
+
+
+
+
+# Examples
+
+```{r}
+#Example for testing the workflow
+
+# Sample <- Sys.getenv(SAMPLE_ID)
+# Sample <- "TARGET.20.PAUJCF.09A.01R" #True positive
+Sample <- "TARGET.20.PAUSXS.09A.01R" #True positive
+# Sample <- "TARGET.20.PAUHXN.03A.01R" #True negative 
+
+breakpoints <- examine_breakpoint_evidence(Sample_ID=Sample,
+                                           fusion_data=A_cbfb_myh11,
+                                           file_manifest=B_cbfb_myh11_files,
+                                           mutseq=C_CBFB_mutseq,
+                                           fusion_theoretical=D_CBFB_theoretical,
+                                           Seqlens=E_seqlens,
+                                           cicero.contig=F_cicero.contig,
+                                           TA.contigs=G_TA.contigs)
+
+
+# saveRDS(breakpoints, files.path(paste0(Sample,"_breakpoint_sequence_evidence.RDS")))
+```
+
+
+```{r}
+# Num_RNAseq_Reads_Searched=length(RNAseqReads)
+
+Sample <- "TARGET.20.PAUSXS.09A.01R"
+RNAseq <- subset_bam(fusion_data = A_cbfb_myh11,
+                            file_manifest = B_cbfb_myh11_files,
+                            Sample_ID = Sample,
+                            by_chr = TRUE, scan = TRUE,
+                            Seqlens = seqlens)
+
+
+# length(RNAseq$`16:0-90354753`$seq)
+# RNAseq$`16:0-90354753`$seq
+```
+
+```{r}
+#example with one sequence
+# p1 <- vcountPattern(pattern = mut20[[10]], subject = PAUJCF_RNAseq,
+#                     max.mismatch = 0, min.mismatch = 0,
+#                     with.indels = FALSE,
+#                     fixed = TRUE)
+# 
+# table(p1)
+```
+
+```{r}
+read.matches <- vcountPDict(pdict = mut20,
+                             subject = PAUJCF_RNAseq,
+                             max.mismatch = 0, min.mismatch = 0, 
+                             with.indels = FALSE)
+
+dim(read.matches) #5 4663373 (reads are columns)
+rownames(read.matches) <- names(mut20)
+# class(read.matches) #"matrix" "array" 
+
+read.match.df <- data.frame(Num_Mut20_Junction_Breakpoint_Reads=apply(read.matches, 1, sum)) %>%
+  rownames_to_column("Theoretical_Mut20_Exon_Junctions") %>% 
+  mutate_at(vars(Theoretical_Mut20_Exon_Junctions), ~gsub("revComp","", .)) %>%
+  group_by(Theoretical_Mut20_Exon_Junctions) %>% 
+  mutate(Num_Mut20_Junction_Breakpoint_Reads=sum(Num_Mut20_Junction_Breakpoint_Reads)) %>% 
+  ungroup() %>% 
+  filter(!duplicated(Theoretical_Mut20_Exon_Junctions))
+
+read.match.df
+```
+
+```{r}
+contig.matches <- vcountPDict(pdict = mut20,
+                             subject = PAUJCF.contigs,
+                             max.mismatch = 0, min.mismatch = 0, 
+                             with.indels = FALSE)
+
+dim(contig.matches)  #5 3
+rownames(contig.matches) <- names(mut20)
+colnames(contig.matches) <- names(PAUJCF.contigs)
+```
+
+```{r}
+#Create a tally of the contig hits
+contig.match.df <- data.frame(Num_Mut20_Contig_Matches=apply(t(contig.matches), 2, sum)) %>%
+  rownames_to_column("Theoretical_Mut20_Exon_Junctions") %>% 
+  mutate_at(vars(Theoretical_Mut20_Exon_Junctions), ~gsub("revComp","", .)) %>%
+  group_by(Theoretical_Mut20_Exon_Junctions) %>% 
+  mutate(Num_Mut20_Contig_Matches=sum(Num_Mut20_Contig_Matches)) %>% 
+  ungroup() %>% 
+  filter(!duplicated(Theoretical_Mut20_Exon_Junctions))
+
+#Also return the contog sequence itself
+contig.seq.df <- data.frame(contig.matches) %>%
+  rownames_to_column("Theoretical_Mut20_Exon_Junctions") %>% 
+  mutate_at(vars(Theoretical_Mut20_Exon_Junctions), ~gsub("revComp","", .)) %>%
+  #make seq and revcomp seq identical results (eg. a hit for seq or revcomp seq considered a hit)
+  group_by(Theoretical_Mut20_Exon_Junctions) %>% 
+  mutate_at(vars(matches("contig")), ~sum(.)) %>%  
+  ungroup() %>% 
+  #make into long format and substitue a hit ==1 to hit == contig.sequence
+  gather(Contig.Name, Contig.Match, matches("^contig")) %>%
+  group_by(Contig.Name) %>% 
+  mutate_at(vars(Contig.Match), ~case_when(
+    . == 0 ~ as.character(.),
+    . == 1 ~ as.character(PAUJCF.contigs[[unique(Contig.Name)]]))) %>% 
+  group_by(Theoretical_Mut20_Exon_Junctions, .add=TRUE) %>%
+  filter(!duplicated(Theoretical_Mut20_Exon_Junctions)) %>%
+  ungroup() %>% 
+  spread(Contig.Name,Contig.Match) %>%
+  rename_all(~gsub("contig.", "Matching_Contig_for_Mut20_Junctions_", .))
+
+
+# View(contig.match.df)
+# View(contig.seq.df)
+```
+
+```{r}
+PAUJCF.results <- tibble(Sample=rep(Sample, 
+                                    nrow(read.match.df))) %>% 
+  bind_cols(.,read.match.df) %>% 
+  left_join(., contig.match.df, by="Theoretical_Mut20_Exon_Junctions") %>% 
+  left_join(., contig.seq.df, by="Theoretical_Mut20_Exon_Junctions")
+  
+# PAUJCF.results
+```
+
+
+
+
+
+
+
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

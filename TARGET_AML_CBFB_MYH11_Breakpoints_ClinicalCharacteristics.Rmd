@@ -1,0 +1,898 @@
+---
+title: "Clinical Characteristics of CBFB-MYH11 AML"
+author: "Jenny Smith"
+date: "March 25, 2020"
+output: html_document
+---
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+clinical <- substr(CDE,1,nchar(CDE)-4)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME, "2020.09.15_RNAseq_Fusion_Breakpoints"))
+
+
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center')
+options(stringsAsFactors = FALSE)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(gridExtra)
+library(tidyr)
+library(dplyr)
+library(RColorBrewer)
+# library(compareGroups)
+
+library(DeGSEA)
+getwd()
+```
+
+
+#Define Functions 
+
+```{r}
+subset_summarize_breakpoints <- function(fusions_df, FOIs, filename="breakpoints_table.xlsx"){
+  
+  dataframes <- list()
+  for(FOI in FOIs){
+  
+  genes <- str_split_fixed(FOI, pattern = "-", n=2) #paste0(genes,"\\b")
+  regex <- paste(paste(genes[,1], genes[,2], sep="-"), 
+                 paste(genes[,2], genes[,1], sep="-"), sep="|")
+    
+  df <- fusions_df %>% 
+    filter(grepl(regex, Fusion.Category)) %>% 
+    select(Patient,SJ_ID, Fusion.Category,
+           breakpoint_comparison,
+           breakpoint.TA, Breakpoints.STAR, 
+           Breakpoint.CICERO,
+        matches("Alternate.Breakpoints"),
+        Num_FusionCaller_Hits, 
+        matches("Reads?|breakpoint_pairs")) %>% 
+  
+        select(-matches("TargAlign$|^sum\\."))%>%
+        arrange(breakpoint_comparison, Patient) 
+  
+  #Clean and make into the long format for breakpoints
+  brkpts <- df %>% 
+        separate(Alternate.Breakpoints.TA,
+                 into=paste0("Alternate.Breakpoints",1:100, ".TA"),
+                 sep="; ",
+                 remove=TRUE) %>%
+        separate(Alternate.Breakpoints.STAR,
+                 into=paste0("Alternate.Breakpoints",1:100, ".STAR"),
+                 sep="; ",
+                 remove=TRUE) %>%
+        separate(Alternate.Breakpoints.CICERO,
+                 into=paste0("Alternate.Breakpoints",1:100, ".CICERO"),
+                 sep="; ",
+                 remove=TRUE) %>%
+        select_if(~!all(is.na(.))) %>%
+        
+        rowwise() %>%
+        mutate_at(vars(matches("^[bB]reakpoints?\\.[A-Z]|^Alternate.Breakpoints[0-9]")),
+                  ~sort(str_split(., pattern = "\\|")[[1]]) %>% #sort the breakpoints
+                    paste(., collapse = "|")) %>%
+        ungroup() %>%
+
+        #Create long format
+        gather(Caller, Breakpoint,
+               matches("^[bB]reakpoints?\\.[A-Z]|^Alternate.Breakpoints[0-9]")) %>%
+        filter(Breakpoint != "") %>%
+        mutate_at(vars(Caller), ~gsub("^b","B", 
+                                      gsub("Alternate.Breakpoints[0-9]{,1}",
+                                                     "Alternate_Breakpoints", .))) %>%
+        mutate_at(vars(Caller), ~gsub("s$","", 
+                                      gsub("^Breakpoints?",
+                                           "Primary_Breakpoint", .))) %>%
+        separate(Caller, into=c("Breakpoint_Type", "Algorithm"), sep="\\.") %>%
+        arrange(Patient, breakpoint_comparison)
+  
+     #summary by fusion breakpoin type 
+    brkpts.summary <- brkpts %>% 
+        group_by(Patient, Breakpoint_Type) %>% 
+        filter(!duplicated(Breakpoint)) %>%
+        ungroup() %>%
+      
+        #for this purpose, I've been using the primary breakpoints 
+        filter(Breakpoint_Type=="Primary_Breakpoint") %>% 
+        
+        group_by(Fusion.Category,Breakpoint_Type, Breakpoint) %>%
+        summarize(Number_Breakpoint_Called=n()) %>%
+        ungroup() %>% 
+        
+        arrange(desc(Breakpoint_Type),desc(Number_Breakpoint_Called))
+
+    
+    sheetName <- paste0(FOI,"_Breakpt_Summary")
+    dataframes[[sheetName]] <- brkpts.summary 
+  }
+  openxlsx::write.xlsx(dataframes, file= filename)
+  message("Completed and save Breakpoint Tables")
+}
+```
+
+
+
+#Read in the clinical Data
+
+```{r}
+# merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_12.01.20.csv"))
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_Shareable_12.09.20.csv"),
+                          row.names=1, na.strings = c("#N/A","N/A", "^$", "^\\.$", "NA"))
+
+ineligables  <- filter(merged,  Eligibility_Comments == "remove") 
+# write.csv(ineligables, "TARGET_AML_Ineligable_forBiological_Study_or_Outcome_Analysis.csv", row.names = FALSE)
+  
+
+merged <- merged %>%
+  filter(!is.na(USI), USI != "Unknown") %>%
+  filter(Eligibility_Comments != "remove") %>%
+  set_rownames(.$USI)
+
+
+dim(merged)
+dim(ineligables)
+
+
+```
+
+```{r}
+# table(merged$c.Kit.Mutation.Exon.17,useNA='ifany')
+# table(merged$c.Kit.Mutation.Exon.8,useNA='ifany')
+# 
+# table(merged$c.Kit.Mutation.Exon.17,
+#       merged$Protocol, useNA='ifany')
+# table(merged$c.Kit.Mutation.Exon.8,
+#       merged$Protocol, useNA='ifany')
+```
+
+```{r}
+comuts <- xlsx::read.xlsx("CBFB.MYH11_Results/Clinical_Covariates/Inv16_oncoprint_setup.xlsx",sheetIndex = 1)  %>%
+  select(USI=patientID,everything(),-NA.) %>%
+  unique() %>% #some duplicate entries. 
+  # #for co-mutation KM analyses
+  spread(gene,Mutation) %>%
+  select_if(~sum(grepl("yes|^PA[A-Z]", .)) >= 10) %>%
+  select(-contains("INV_16")) %>%
+  mutate_at(vars(FLT3_PM:WT1),
+            ~ifelse(is.na(.), "No", .)) %>%
+  select(USI, FLT3_PM:WT1) %>%
+  rename_at(vars(FLT3_PM:WT1), ~paste0(., "_CBFB.MYH11"))
+
+
+head(comuts)
+# dim(comuts) #396   4
+# table(duplicated(comuts$USI)) #FALSE
+# lapply(select(comuts,FLT3_PM_CBFB.MYH11:WT1_CBFB.MYH11),table, useNA='ifany')
+```
+
+```{r}
+groups <- xlsx::read.xlsx("CBFB.MYH11_Results/Theoretical_data/TARGET_0531_1031.CBFB-MYH11.FusionBreakpoint.Unmasked.xlsx",
+                    sheetIndex = 1) 
+  
+head(groups)
+dim(groups) #152 143
+# table(duplicated(groups$USI)) #FALSE
+```
+
+```{r}
+table(groups$USI %in% ineligables$USI)
+```
+
+
+#Read in the Fusion Data
+
+```{r message=FALSE, warning=FALSE}
+fusions <- readr::read_csv(file.path(PROJHOME, "2018.09.11_Combine_Fusion_Calls/Combined_withConfidence_Intervals/TARGET_AML_0531_1031_Relapse_Combined_STAR_TransAbyss_CICERO_FusionCalls_withConfidenceLevels_Annotated_6.17.2020.csv")) %>% 
+  select(Sample=Patient, everything())
+
+
+dim(fusions) #178667    175
+# fusions$All_Fusions_Called
+```
+
+```{r}
+cbfb.cicero <- fusions %>% 
+  filter(USI %in% groups$USI) %>% 
+  filter(!grepl("_replicate", Sample)) %>% 
+  filter(grepl("CBFB.MYH11", Fusion.Category), Time_point == "diagnostic") %>% 
+  select(Sample,USI,breakpoint_comparison,
+         Fusion.TA:Fusion.Category.CICERO,
+         breakpoint.TA:Breakpoint.CICERO)
+
+
+dim(cbfb.cicero) #101  10 (missing 51 samples?)
+head(cbfb.cicero)
+
+# table(duplicated(cbfb.cicero$Sample)) #OK no dups
+# table(duplicated(cbfb.cicero$USI)) #OK no dups
+# table(is.na(cbfb.cicero$Breakpoint.CICERO)) #13/101 missing CICERO calls
+```
+
+```{r}
+# cbfb.cicero %>% 
+#   group_by(breakpoint_comparison) %>% 
+#   summarise(N=n()) %>% 
+#   arrange(desc(N)) %>% 
+#   write.csv(.,"CBFB.MYH11_Ribodepleted_RNAseq_Fusion_Breakpoints.csv", row.names = F)
+```
+
+
+# Read in File Manifests 
+
+Check how many inv16 have RNAseq and how many are missing data? 
+
+```{r}
+polyA_RNAseq_files <- read.csv("BAM_Manifests/TARGET_AML_polyA_RNAseq_Bam_Manifest_10.02.20.csv", 
+                               row.names = 1)  %>% 
+  filter(Time_point=="diagnostic",
+         USI %in% merged$USI)  %>%
+  select(-Reg.)
+
+
+dim(polyA_RNAseq_files)
+table(duplicated(polyA_RNAseq_files$Sample)) #FALSE
+table(polyA_RNAseq_files$Time_point)
+table(polyA_RNAseq_files$AML_Subtype)
+```
+
+```{r}
+RBD_RNAseq_files <- read.csv("BAM_Manifests/TARGET_AML_Ribodepleted_RNAseq_Bam_Manifest_10.02.20.csv",row.names = 1) %>% 
+  filter(Time_point=="diagnostic", Group=="AML",
+         USI %in% merged$USI) %>%
+  select(-Reg.)
+
+dim(RBD_RNAseq_files)
+table(duplicated(RBD_RNAseq_files$Sample)) #FALSE
+table(RBD_RNAseq_files$Protocol)
+table(RBD_RNAseq_files$AML_Subtype, RBD_RNAseq_files$Batch)["CBFB-MYH11",]
+```
+
+```{r}
+SRA_RNAseq_files <- read.csv(file.path(TARGET, "SequencingDataMatrix/Fastq_manifests/TARGET_AML_Discovery_RNAseq_AWS_S3_Fastq_Manifest_10.14.20.csv"))  %>% 
+  filter(Time_point=="diagnostic", USI %in% merged$USI)
+
+
+dim(SRA_RNAseq_files)
+table(duplicated(SRA_RNAseq_files$Sample)) #FALSE
+table(SRA_RNAseq_files$AML_Subtype)
+```
+
+
+#Inv.16 patients with RNAseq 
+
+```{r}
+inv.16 <- merged %>% 
+  filter(grepl("CBFB-MYH11", Primary.Fusion) | grepl("CBFB-MYH11", Additional.Fusions.CNV)) %>% 
+  pull(USI)
+
+length(inv.16)
+length(unique(inv.16))
+```
+
+```{r}
+anyRNAseq <- unique(c(RBD_RNAseq_files$USI, polyA_RNAseq_files$USI, SRA_RNAseq_files$USI))
+table(inv.16 %in% anyRNAseq) #201/239 have polyA or RBD RNAseq
+table(inv.16 %in% groups$USI) #but missing 87 patients in Xiaotu's and Ben's Analysis
+
+
+#only care about those with RNAseq to fill in any gaps
+inv.16 <- inv.16[inv.16 %in% anyRNAseq]
+missing_inv.16 <- inv.16[!inv.16 %in% unique(groups$USI)]
+length(missing_inv.16) #49
+```
+
+```{r}
+missing <- merged %>% 
+  filter(USI %in% missing_inv.16) %>% 
+  select(USI, Protocol, Cyto.vs..Seq) #s%>% 
+  # filter(!grepl("cyto only; no RNA seq avail",Cyto.vs..Seq))
+
+dim(missing)
+table(missing$Protocol)
+```
+
+```{r}
+hasRBD <- unique(missing$USI[missing$USI %in% RBD_RNAseq_files$USI])
+hasPolyA <- unique(missing$USI[missing$USI %in% polyA_RNAseq_files$USI])
+hasPolyA <- setdiff(hasPolyA, hasRBD)
+
+hasDiscovery <- unique(missing$USI[missing$USI %in% SRA_RNAseq_files$USI])
+hasDiscovery <- setdiff(hasDiscovery, hasRBD)
+hasDiscovery <- setdiff(hasDiscovery, hasPolyA)
+  
+length(hasRBD)
+length(hasPolyA)
+length(hasDiscovery)
+```
+
+```{r}
+#These were all processed either by 
+
+toFill_1 <- filter(RBD_RNAseq_files, USI %in% hasRBD) #23
+toFill_2 <- filter(polyA_RNAseq_files, USI %in% hasPolyA)  #3
+toFill_3 <- filter(SRA_RNAseq_files, USI %in% hasDiscovery) #23
+
+# View(toFill_3)
+# write.csv(toFill_3, "00_archive/TARGET_AML_Discovery_polyA_RNAseq_CBFB-MYH11_NeedExonJunctions.csv", row.names = F)
+# write.csv(toFill_1,"CBFB.MYH11_Results/TARGET_AML_RBD_RNAseq_CBFB-MYH11_NeedExonJunctions.csv", row.names = F)
+# write.csv(toFill_2,"CBFB.MYH11_Results/TARGET_AML_polyA_RNAseq_CBFB-MYH11_NeedExonJunctions.csv", row.names = F)
+```
+
+##Discovery Set RNAseq 
+
+```{r}
+TA.discovery <- xlsx::read.xlsx(file.path(TARGET,"RNA/mRNAseq/level2/fusion/concat_matrices/2014Aug_BCCA_0531_Illumina_data/Book3.xlsx"), 
+                                sheetIndex = 1)
+
+# TA.discovery
+```
+
+```{r}
+coords <- TA.discovery %>% 
+  select(chr, coord) %>%
+  unique() %>% 
+  mutate(Transcript_ID=factor(case_when(
+    grepl("^158", coord) ~ "NM_002474.3",
+    grepl("^671", coord) ~ "NM_022845.3"), 
+    levels=c("NM_022845.3", "NM_002474.3"))) %>% 
+  mutate(Exon=case_when(
+    coord == "15814908" ~ "33",
+    coord == "67116211" ~ "5",
+    coord == "15820911" ~ "28",
+    coord == "15815199" ~ "intron32",
+    coord == "67116326" ~ "intron5",
+    coord == "67116242" ~ "intron5",
+    coord == "15815200" ~ "intron32",
+    coord == "67116325" ~ "intron5"
+  ))
+
+
+# coords
+```
+
+```{r}
+TA.discoveryExons <-  TA.discovery %>% 
+  left_join(.,coords, by=c("chr", "coord")) %>% 
+  select(sampleID:coord,  Transcript_ID:Exon, everything()) %>% 
+  group_by(sampleID, sampleType, fusionID) %>% 
+  arrange(sampleID,sampleType,desc(fusionID),Transcript_ID) %>% 
+  ungroup() %>% 
+  
+  mutate(fusionID_Group=gsub("(^.+[0-9])[ab]$","\\1", fusionID)) %>%
+  group_by(sampleID,sampleType,fusionID_Group) %>%
+  mutate(Exons=paste(Exon,  collapse = "_")) %>%
+  ungroup()  %>% 
+  
+  group_by(sampleID,sampleType) %>% 
+  mutate(Fusion_Breakpoint_Unmasked=case_when(
+    any(grepl("5_33", Exons)) ~ "5_33", 
+    any(grepl("5_28", Exons)) ~ "5_28", 
+    TRUE ~ "what")) %>%
+  
+  select(sampleID:sampleType,
+       chr:coord, G5PR,G3PR,
+       Transcript_ID:fusionID, 
+       Exons,Fusion_Breakpoint_Unmasked,
+       fusionID_Group)  %>% 
+  arrange(sampleID)
+  
+# table(TA.discoveryExons$Exons)
+# head(TA.discoveryExons)
+dim(TA.discoveryExons)
+length(unique(TA.discoveryExons$sampleID))
+```
+
+```{r}
+TA.discoveryExonsA <- filter(TA.discoveryExons, Transcript_ID == "NM_022845.3") %>%
+  select(sampleID, sampleType, chrA=chr, coordA=coord,ExonA=Exon,Transcript_ID_A=Transcript_ID,
+         everything())
+  
+TA.discoveryExonsB <- filter(TA.discoveryExons, Transcript_ID == "NM_002474.3") %>% 
+  select(sampleID, sampleType,fusionID_Group, chrB=chr, coordB=coord, ExonB=Exon,Transcript_ID_B=Transcript_ID, Exons)
+
+
+TA.discovery.fmt <- inner_join(TA.discoveryExonsA,TA.discoveryExonsB, 
+                               by=c("sampleID","sampleType","Exons","fusionID_Group")) %>% 
+  select(sampleID,sampleType, Fusion_Breakpoint_Unmasked,matches("chr|coord|^Exon[AB]|Transcript_ID"), everything()) %>% 
+  rowwise() %>% 
+  mutate(Breakpoint=paste(paste(chrA,coordA, sep=":"), 
+                           paste(chrB,coordB, sep = ":"),
+                           sep="|")) %>% 
+  ungroup() 
+
+
+head(TA.discovery.fmt) 
+dim(TA.discovery.fmt) #39 16
+
+#NM_022845.3	CBFB
+#NM_002474.3	MYH11
+# length(unique(TA.discovery.fmt$sampleID))
+```
+
+
+
+##Merge in Missing Patient Samples 
+
+```{r}
+#polyA and RBD by RNAseq reads sequence search
+RBD_polyA_addl <- read.csv("CBFB.MYH11_Results/Theoretical_data/TARGET_AML_CBFB-MYH11_RNAseq_mut20_bySeq_Search.csv") %>% 
+  select(Sample:USI,Fusion_Breakpoint_Unmasked=Exons,Breakpoint, Isoform,Mut20) %>%
+  mutate(Fusion_Breakpoint=ifelse(Fusion_Breakpoint_Unmasked=="5_33", "A","B"))
+
+head(RBD_polyA_addl)
+# dim(RBD_polyA_addl) #15  7
+```
+
+```{r}
+#RBD that were missed by sequence search
+# Annotated the location of the fusion exon using the breakpoint 
+RBD_Breakpoint <- read.csv("CBFB.MYH11_Results/Theoretical_data/TARGET_AML_CBFB_MYH11_RBD_Exons_by_Breakpoint_Pos.csv") %>% 
+  select(Sample,Fusion_Breakpoint_Unmasked=Exons,Fusion,Breakpoint) %>%
+
+  #TA re-ordered the fusion breakpoint so its MYH11-CBFB... need to swap.
+  mutate_at(vars(Fusion_Breakpoint_Unmasked), ~gsub("intron20_intron5", "intron5_intron20", .)) %>%
+  mutate(USI=str_split_fixed(Sample,"\\.", n=5)[,3],
+         Fusion_Breakpoint=ifelse(Fusion_Breakpoint_Unmasked=="5_33", "A","B")) %>%
+  select(-Fusion)
+
+head(RBD_Breakpoint)
+# dim(RBD_Breakpoint) #8 4
+# table(RBD_Breakpoint$Fusion_Breakpoint)
+```
+
+```{r}
+discovery <- TA.discovery.fmt %>% 
+  select(USI=sampleID,sampleType,Fusion_Breakpoint_Unmasked=Exons,Breakpoint) %>% 
+  filter(!grepl("04A|40A", sampleType)) %>% 
+  group_by(USI,sampleType) %>%
+  filter(!duplicated(USI, fromLast = T)) %>%
+  ungroup() %>%
+  
+  mutate(Fusion_Breakpoint=ifelse(Fusion_Breakpoint_Unmasked=="5_33", "A","B")) %>% 
+  inner_join(., toFill_3, by="USI")
+  
+
+dim(discovery)
+table(duplicated(discovery$USI))
+
+head(discovery)
+# discovery$USI[!discovery$USI %in% toFill_3$USI]
+# toFill_3$USI [!toFill_3$USI %in% discovery$USI ]
+```
+
+```{r}
+groups <- groups %>% 
+  mutate(Breakpoint_Annotation="Xiaotu Ma, CICERO") %>% 
+  left_join(., cbfb.cicero, by="USI") %>% 
+  bind_rows(., select(discovery, USI, Fusion_Breakpoint,Fusion_Breakpoint_Unmasked, Breakpoint) %>% 
+              mutate(Breakpoint_Annotation="Jenny Smith, TransAbyss")) %>% 
+  bind_rows(., select(RBD_polyA_addl, USI, Fusion_Breakpoint, Fusion_Breakpoint_Unmasked, Breakpoint, Mut20) %>% 
+              mutate(Breakpoint_Annotation="Jenny Smith, Sequence Search")) %>%
+  bind_rows(., select(RBD_Breakpoint, USI,Fusion_Breakpoint,Fusion_Breakpoint_Unmasked, Breakpoint) %>% 
+              mutate(Breakpoint_Annotation=c("Jenny Smith, TransAbyss",
+                                             rep("Jenny Smith, STAR-Fusion", 7)))) %>%
+  
+  left_join(., merged, by="USI") %>%
+  left_join(., comuts, by=c("USI")) %>%
+  mutate(karyotype_Classes=case_when(
+    grepl("inv\\(16\\)\\(p?13.?1?;?q22\\)|inv\\(16\\)\\(p13.[13];?q22\\)", ISCN) ~ "inv(16) Karyo",
+    grepl("t\\(16;16\\)\\(p13;?q22\\)|t\\(16;16\\)\\(p13.1;q22\\)", ISCN) ~ "t(16;16) Karyo",
+    grepl("ins\\(16\\)|ins\\(16;16\\)", ISCN) ~ "ins(16) Karyo",
+    grepl("Unknown", ISCN) ~ "Unknown",
+    TRUE ~ "Karyo conflicts")) %>%
+  select(USI:Fusion_Breakpoint_Unmasked,Breakpoint_Annotation,
+         matches("^[Bb]reakpoint"),
+         FLT3_PM_CBFB.MYH11:WT1_CBFB.MYH11,  everything())
+
+
+head(groups)
+tail(groups)
+dim(groups) #196
+# table(duplicated(groups$USI)) # FALSE
+
+
+# write.csv(groups,"TARGET_AML_CBFB_MYH11_Breakpoint_Exon_Data_REG_12.04.20.csv", row.names = F)
+# write.csv(select(groups,-Reg.),"TARGET_AML_CBFB_MYH11_Breakpoint_Exon_Data_shareable_12.04.20.csv", row.names = F)
+
+# table(groups$Breakpoint_Annotation)
+``` 
+
+```{r}
+ineligables_new <- read.csv(file.path(CDE,"Merged/Ineligables_COG_2020.11.24.csv")) %>% 
+  filter(!is.na(Not_in))
+
+ineligables_new
+```
+
+```{r}
+table(groups$USI %in% ineligables$USI)
+table(groups$Reg. %in% ineligables_new$Reg_NO)
+
+ineligables_new %>%
+  mutate_all(as.character) %>% 
+  filter(Reg_NO %in% groups$Reg.) %>%
+  left_join(., select(merged, Reg., USI, Protocol), 
+            by=c("Reg_NO"="Reg.")) %>% 
+  select(-c(Reg_NO:NUP98_X)) %>% 
+  left_join(., select(groups,USI:Fusion_Breakpoint_Unmasked), 
+            by="USI") %>% 
+  # write.csv(., "TARGET_AML_ArmD_Excluded_from_Outcome_Analysis.csv", row.names = FALSE)
+```
+
+
+
+#Do karyotype result in identical fusion breakpoints? 
+
+inv(16)(p13q22) 
+t(16;16)(p13;q22) 
+
+```{r}
+df <- select(groups, USI,karyotype_Classes,ISCN,Fusion_Breakpoint_Unmasked)
+
+# write.csv(df, "CBFB_MYH11_Results/TARGET_AML_CBFB-MYH11_Karyotype_Breakpoints.csv")
+```
+
+```{r}
+Karyo_vs_Breakpoint <- groups %>% 
+  filter(karyotype_Classes != "Unknown") %>% 
+  group_by(karyotype_Classes,Fusion_Breakpoint) %>% 
+  summarize(N=n()) %>% 
+  ungroup() %>% 
+  mutate(Fusion_Breakpoint=ifelse(Fusion_Breakpoint == "A","Exon5_33","Other_Exons")) %>%
+  group_by(karyotype_Classes) %>%
+  mutate(Total_Patients_Per_Karyo_Class=sum(N)) %>% 
+  ungroup() %>% 
+  mutate(Percent=paste(round((N/Total_Patients_Per_Karyo_Class)*100, digits = 2),"%")) %>%
+  arrange(karyotype_Classes,desc(N)) %>% 
+  select(-N) %>% 
+  spread(Fusion_Breakpoint, Percent) 
+  
+
+
+Karyo_vs_Breakpoint
+# write.csv(Karyo_vs_Breakpoint,"CBFB_MYH11_Results/TARGET_AML_CBFB-MYH11_Karyotype_vs_Breakpoint_Table.csv", row.names = F)
+
+```
+
+
+#Clinical Characteristics Table
+
+```{r}
+groups <- read.csv("TARGET_AML_CBFB_MYH11_Breakpoint_Exon_Data_10.29.20.csv") 
+ 
+dim(groups)
+table(groups$Fusion_Breakpoint) #33
+# forTodd <- groups %>% 
+#   select(USI,Protocol, Fusion_Breakpoint, matches("c.Kit")) %>% 
+#   arrange(desc(Fusion_Breakpoint))
+# 
+# 
+# table(forTodd$Fusion_Breakpoint)
+# table(forTodd$USI %in% ineligables)
+# dim(forTodd) #188 152
+
+# write.csv(forTodd, file.path(TARGET,
+#                              "Clinical/analysis/2020.09.20_CBFB_MYH11_Breakpoints/TARGET_AML_CBFB_MYH11_forOutcomeAnalysis.csv"),
+#                              row.names = FALSE)
+```
+
+
+
+```{r}
+dat <- groups %>% 
+  select(Fusion_Breakpoint,Fusion_Breakpoint_Unmasked,
+         Protocol,Age.Category,Age.in.years:MRD...at.end.of.course.2,
+         c.Kit.Mutation.Exon.8:c.Kit.Mutation.Exon.17,
+         CBL.Mutation,
+         M6_AML:M7_AML,FLT3.ITD.positive.:CEBPA.mutation.,
+         CR.status.at.end.of.course.1:SCT.in.1st.CR,
+         OS.event.ID,EFS.event.type.ID ) %>%
+  
+  mutate_if(is.character, ~case_when(
+    .=="Unknown" ~ NA_character_, 
+    .=="unknown" ~ NA_character_, 
+    .=="Not reported" ~ NA_character_,
+    .=="<0.1" ~ NA_character_,
+    grepl("^\\.$", .) ~ NA_character_,
+    TRUE ~.))  
+
+# View(dat)
+dim(dat) #188  32
+table(dat$Protocol, useNA='ifany')
+table(dat$CR.status.at.end.of.course.2,useNA='ifany')
+table(dat$Fusion_Breakpoint, useNA='ifany')
+table(dat$Age.Category,useNA='ifany')
+```
+
+
+###Make the tables 
+
+```{r}
+date_made = "10.29.20"
+  
+all.comp <- compareGroups(
+                        formula = Fusion_Breakpoint ~ .,
+                        data = dat,
+                        method = 4,
+                        max.ylev = 7,
+                        max.xlev = 10,
+                        Q1 = 0,
+                        Q3 = 1,
+                        ref = 1,
+                        p.corrected = TRUE,
+                        include.miss = FALSE)
+
+table.final <- createTable(all.comp)
+# export2csv(table.final,paste0("CBFB.MYH11_Results/Clinical_Covariates/TARGET_AML_CBFB-MYH11_byBreakpoint_Clinical_Characteristics_",date_made,".csv"))
+```
+
+
+#Kaplan-Meier Plots
+
+```{r}
+outcome.df <- groups %>% 
+  filter(!is.na(EFS.time..days.)) %>%
+  select(1:50,matches("^c.Kit|^OS|^EFS|^Event")) %>% 
+  mutate(Protocol)
+
+# dim(outcome.df)
+
+table(outcome.df$Fusion_Breakpoint)
+table(outcome.df$Protocol, outcome.df$Fusion_Breakpoint,  useNA='ifany')
+table(outcome.df$TARGET_or_1031, outcome.df$Fusion_Breakpoint,  useNA='ifany')
+```
+
+```{r}
+km.breakpoints <- KM.plots(df=mutate_at(outcome.df, 
+                                        vars(Fusion_Breakpoint),~ifelse(.=="A", "Exon5_33", "Other_Exons")),
+                           group_vars = "TARGET_or_1031", 
+                           type="OS", 
+                           covariate = "Fusion_Breakpoint",
+                           cohort = "1031")
+km.breakpoints
+```
+
+```{r fig.height=12, fig.width=12}
+# pdf("CBFB.MYH11_Results/Figures/TARGET_AML_CBFB-MYH11_byBreakpoint_and_Protocol_KMplots_v3.pdf", height = 11, width = 11)
+grid.arrange(grobs=c(km.breakpoints$OS, km.breakpoints$EFS), ncol=2)
+# dev.off()
+```
+
+```{r}
+km.brk.groups <- KM.plots(df=mutate_at(outcome.df, 
+                                        vars(Fusion_Breakpoint),~ifelse(.=="A", "Exon5_33", "Other_Exons")),
+                           group_vars = NULL, 
+                           type="OS", 
+                           covariate = "Fusion_Breakpoint",
+                           cohort = "1031")
+```
+
+
+```{r fig.height=6, fig.width=12}
+# pdf("CBFB.MYH11_Results/Figures/TARGET_AML_CBFB-MYH11_byBreakpoint_KMplots_v3.pdf", height = 6, width = 12)
+grid.arrange(grobs=c(km.brk.groups$OS, km.brk.groups$EFS), ncol=2)
+# dev.off()
+```
+
+#cKIT Mutations
+
+```{r}
+df <- outcome.df %>% 
+  filter(!(c.Kit.Mutation.Exon.8 == "Yes" & c.Kit.Mutation.Exon.17 == "Yes")) %>%
+  mutate(Exon5_33_cKIT.mut=case_when(
+    Fusion_Breakpoint=="B" ~ "Other_Exons",
+    Fusion_Breakpoint=="A" & c.Kit.Mutation.Exon.8 == "Yes" ~ "Exon5_33/cKIT.E8",
+    Fusion_Breakpoint=="A" & c.Kit.Mutation.Exon.17 == "Yes" ~ "Exon5_33/cKIT.E17",
+    TRUE ~ "No cKIT Mut")) 
+
+
+final.kit.df <-   bind_rows(df, mutate(df, Exon5_33_cKIT.mut="All_inv16"))
+dim(final.kit.df)
+
+# table(df$c.Kit.Mutation.Exon.17)
+# table(df$c.Kit.Mutation.Exon.8)
+
+table(df$Exon5_33_cKIT.mut, useNA = 'ifany')
+# table(df$c.Kit.Mutation.Exon.8, df$Fusion_Breakpoint)
+# table(df$c.Kit.Mutation.Exon.17, df$Fusion_Breakpoint)
+```
+
+```{r fig.height=8,fig.width=14}
+KM.cKIT <- KM.plots(df = final.kit.df,
+                 group_vars = NULL,
+                 type = "OS",
+                 covariate = "Exon5_33_cKIT.mut", 
+                 cohort = "1031",
+                 riskTable = TRUE)
+
+
+# pdf("CBFB.MYH11_Results/TARGET_AML_CBFB_MYH11_Breakpoints_with_c.KIT_KM_v4.pdf", height = 10, width = 16)
+grid.arrange(grobs=c(KM.cKIT$OS, KM.cKIT$EFS), ncol=2)
+# dev.off()
+
+```
+
+## Other Co-Occuring Mutations
+
+```{r}
+cols <- c("FLT3_PM_CBFB.MYH11", 
+          "KIT_exon_17_CBFB.MYH11",
+          "KIT_exon_8_CBFB.MYH11",
+          "KRAS_CBFB.MYH11",
+          "NRAS_CBFB.MYH11",
+          "WT1_CBFB.MYH11")
+```
+
+```{r}
+KM.comuts <- lapply(cols, function(x){
+  
+  KM.plots(df = outcome.df,
+                 group_vars = NULL,
+                 type = "OS",
+                 covariate = x, 
+                 cohort = "1031",
+                 riskTable = TRUE)
+  
+})
+
+length(KM.comuts)
+names(KM.comuts) <- cols
+```
+
+```{r fig.height=5, fig.width=8}
+for (col in cols){
+  grid.arrange(grobs=c(KM.comuts[[col]]$OS,
+                      KM.comuts[[col]]$EFS), 
+             ncol=2)
+  
+}
+
+```
+
+```{r}
+KM.comuts.breakpoint <- lapply(cols, function(col){
+  
+  
+  newCol=paste0( col,"_vs_Breakpoint")
+  tmp <- outcome.df %>% 
+    mutate_at(vars(Fusion_Breakpoint), ~gsub("B","Other_Exons", gsub("A","Exon5_33", .))) %>% 
+    unite(., col=!!newCol, Fusion_Breakpoint,col, sep="/", remove = F)
+  
+  
+  if (any(table(tmp[[newCol]]) < 3)){
+    rmGroups <- names(which(table(tmp[[newCol]]) < 3)) %>%
+      paste(., collapse="|")
+    
+    print(c(col,rmGroups))
+    
+    tmp <- tmp %>% 
+      filter(!grepl(rmGroups, .data[[newCol]]))
+  }
+  
+  
+   KM.plots(df = tmp,
+                 group_vars = NULL,
+                 type = "OS",
+                 covariate = newCol, 
+                 cohort = "1031",
+                 riskTable = TRUE)
+  
+  
+})
+names(KM.comuts.breakpoint) <- cols
+```
+
+```{r fig.height=5, fig.width=8}
+for (col in cols){
+  fname = paste0("CBFB_MYH11_Results/TARGET_AML_",col,"_vs_Breakpoint_KM.pdf")
+  pdf(fname, height = 7, width = 10)
+  grid.arrange(grobs=c(KM.comuts.breakpoint[[col]]$OS,
+                      KM.comuts.breakpoint[[col]]$EFS),
+             ncol=2)
+  dev.off()
+  
+}
+```
+
+
+
+#Relapse Data for Xiaotu Ma
+
+```{r}
+relapse.cases <- xlsx::read.xlsx("CBFB.MYH11_Results/Clinical_Covariates/RNAindel_Results_Kohei_send.xlsx", sheetIndex = 1)
+
+
+head(relapse.cases)
+dim(relapse.cases)
+```
+
+```{r}
+relapse.cases.cde <- relapse.cases %>% 
+  left_join(., merged, by="USI") %>% 
+  select(USI, Rsample:wgs,
+         EFS.time..days.,EFS.event.type.ID, Event.ID,
+         OS.time..days.,OS.event.ID, OS.ID,
+         matches("Days.to.OS|OS.from.end|Days.to.DFS|DFS.from.end."),
+         everything()) %>% 
+  mutate(KIT_Group=case_when(
+    grepl("wt", class) ~ "wildtype",
+    grepl("gain", class) ~ "Acquired",
+    grepl("lost", class) ~ "lost",
+    grepl("same", class) ~ "persistent")) %>% 
+  mutate_at(vars(matches("time")), ~as.numeric(.))
+
+
+# dim(relapse.cases.cde)
+# write.csv(relapse.cases.cde, "RNAindel_Results_Kohei_send_ClinicalData_12.10.20.csv", row.names = F)
+```
+
+```{r}
+table(relapse.cases.cde$OS.event.ID)
+table(relapse.cases.cde$Event.ID)
+table(relapse.cases.cde$KIT_Group)
+```
+
+```{r}
+fit.os <- survfit(Surv(OS.time..days., OS.ID) ~ KIT_Group, data = relapse.cases.cde)
+
+
+p.OS <- ggsurv(fit.os, 
+                CI=FALSE,
+                surv.col = c("Acquired"="red1","lost"="grey50","persistent"="red4","wildtype"="black"),
+                lty.est = 1, size.est = 1.0,
+                cens.size = 2.0,order.legend=FALSE) +
+  theme_classic() +
+  labs(y="Overall Survival", x="Time (days)")
+
+p.OS
+# ggsave("CBFB-MYH11_Relapse_KIT_mutations_OS.pdf",plot=p.OS, height = 5, width=7, device="pdf")
+```
+
+```{r}
+fit.efs <- survfit(Surv(EFS.time..days., Event.ID) ~ KIT_Group, data = relapse.cases.cde)
+
+
+p.EFS <- ggsurv(fit.efs, 
+                CI=FALSE, 
+                surv.col = c("Acquired"="red1","lost"="grey50","persistent"="red4","wildtype"="black"),
+                plot.cens = FALSE,
+                lty.est = 1, 
+                size.est = 1.0,
+                cens.size = 2.0,order.legend=FALSE) +
+    labs(y="Event-Free Survival", x="Time (days)") +
+  theme_classic()
+
+p.EFS
+
+# ggsave("CBFB-MYH11_Relapse_KIT_mutations_EFS.pdf",plot=p.EFS, height = 5, width=7, device="pdf")
+```
+
+
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
